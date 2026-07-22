@@ -1,0 +1,32 @@
+import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { readRepositoryFile, scanSkills, type RepositoryConfig } from "./index.js";
+
+describe("repository tools", () => {
+  it("discovers skills by documented precedence", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    await mkdir(path.join(root, ".github/skills/review"), { recursive: true });
+    await writeFile(path.join(root, ".github/skills/review/SKILL.md"), "---\nname: review\ndescription: Review code\n---\nDo it");
+    const repository: RepositoryConfig = { id: "test", displayName: "Test", path: root, canonicalPath: root, enabled: true, sandboxImage: undefined };
+    const skills = await scanSkills(repository);
+    expect(skills).toHaveLength(1);
+    expect(skills[0]?.name).toBe("review");
+  });
+
+  it("rejects parent traversal", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const repository: RepositoryConfig = { id: "test", displayName: "Test", path: root, canonicalPath: root, enabled: true, sandboxImage: undefined };
+    await expect(readRepositoryFile(repository, "../secret")).rejects.toThrow("outside");
+  });
+
+  it("rejects symlinks that escape the repository", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "repo-outside-"));
+    await writeFile(path.join(outside, "secret.txt"), "secret");
+    await symlink(path.join(outside, "secret.txt"), path.join(root, "escape.txt"));
+    const repository: RepositoryConfig = { id: "test", displayName: "Test", path: root, canonicalPath: root, enabled: true, sandboxImage: undefined };
+    await expect(readRepositoryFile(repository, "escape.txt")).rejects.toThrow("escapes");
+  });
+});

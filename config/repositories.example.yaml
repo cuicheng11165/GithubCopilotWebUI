@@ -1,0 +1,6 @@
+repositories:
+  - id: example
+    displayName: Example Repository
+    path: /repositories/example
+    enabled: true
+    sandboxImage: copilot-web-sandbox:local

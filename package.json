@@ -1,0 +1,25 @@
+{
+  "name": "copilot-web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --parallel --filter '@app/*' dev",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "pnpm --filter @app/db prisma generate",
+    "db:migrate": "pnpm --filter @app/db prisma migrate deploy",
+    "db:migrate:dev": "pnpm --filter @app/db prisma migrate dev"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
