@@ -12,8 +12,8 @@ const envSchema = z.object({
   COOKIE_SECRET: z.string().min(32),
   TOKEN_ENCRYPTION_KEY: z.string().min(32),
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),
-  GITHUB_CLIENT_ID: z.string().min(1),
-  GITHUB_CLIENT_SECRET: z.string().min(1),
+  GITHUB_CLIENT_ID: z.string().optional().or(z.literal("")),
+  GITHUB_CLIENT_SECRET: z.string().optional().or(z.literal("")),
   GITHUB_ALLOWED_ORGS: z.string().default(""),
   GITHUB_ALLOWED_ENTERPRISES: z.string().default(""),
   GHE_HOST: z.string().regex(/^[a-z0-9-]+\.ghe\.com$/i, "GHE_HOST must be a GitHub Enterprise Cloud *.ghe.com host").optional().or(z.literal("")),
@@ -38,8 +38,8 @@ export interface OAuthProviderConfig {
 }
 
 export const oauthProviders: OAuthProviderConfig[] = [
-  {
-    id: "github",
+  ...(config.GITHUB_CLIENT_ID && config.GITHUB_CLIENT_SECRET ? [{
+    id: "github" as const,
     label: "GitHub.com",
     host: "github.com",
     webBaseUrl: "https://github.com",
@@ -48,7 +48,7 @@ export const oauthProviders: OAuthProviderConfig[] = [
     clientSecret: config.GITHUB_CLIENT_SECRET,
     allowedOrgs: config.GITHUB_ALLOWED_ORGS.split(",").map((item) => item.trim()).filter(Boolean),
     allowedEnterprises: config.GITHUB_ALLOWED_ENTERPRISES.split(",").map((item) => item.trim()).filter(Boolean)
-  },
+  }] : []),
   ...(config.GHE_HOST && config.GHE_CLIENT_ID && config.GHE_CLIENT_SECRET ? [{
     id: "ghe" as const,
     label: config.GHE_HOST,
