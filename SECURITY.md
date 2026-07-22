@@ -1,50 +1,45 @@
 # Security model
 
-> `SANDBOX_BACKEND=local` is an explicitly unisolated development and trusted-machine mode. Shell commands and private scripts run as the operating-system user that started CopilotDeck and can read or modify any file that user can access. The container guarantees described below apply only when `SANDBOX_BACKEND=container`.
+CopilotDeck is a trusted-machine application without process or network isolation. Shell commands and private scripts run as the operating-system user that started the application. They can modify repositories, read other files available to that user, start processes, and access local, private, or public network destinations.
 
 ## Trust boundaries
 
-- GitHub tokens are encrypted at rest with AES-256-GCM and are only decrypted by the API or Worker.
-- GitHub tokens, database credentials, application secrets, and the container-runtime socket are never injected into Agent sandboxes.
+- GitHub tokens are encrypted at rest with AES-256-GCM and are decrypted only by the API or Worker.
+- Tokens, application secrets, and database credentials are not added to the environment passed to executed commands.
 - Session identifiers are not authorization. Every API operation checks the authenticated owner in SQLite.
-- The Copilot runtime runs in `mode: "empty"` and receives a per-session GitHub token.
-- In container mode, only the Sandbox Runner can ask the rootless container daemon to execute a workload.
+- The Copilot runtime uses `mode: "empty"`, receives a per-user GitHub token, and exposes only application-defined tools.
+- SDK write/edit tools and unexpected `write` permission requests are rejected.
+- The Local Execution Runner and Worker control endpoint bind to loopback by default and require independent bearer tokens.
 
-## Repository immutability
+## Repository access
 
-In container mode, repository paths are mounted read-only into every sandbox. The SDK has no write/edit tools and rejects every unexpected `write` permission request. Commands such as shell redirection, `sed -i`, package installation into the project, and `git commit` must fail against `/repo`. Temporary output belongs under `/tmp` and is destroyed with the sandbox.
+Repository read tools reject parent traversal, hidden build/dependency surfaces, and symlinks that escape the registered root. These restrictions do not apply to an approved shell command or private script: local processes receive the repository as their working directory and operate with the full permissions of the service account.
 
-In local mode, SDK write tools remain disabled, but shell commands and private scripts are not restricted by that policy. They run with the host repository as their working directory and may modify it or access unrelated host files. Use local mode only on a trusted, single-user machine with repositories that can safely be changed or disclosed.
-
-This does not make repository contents confidential from the Agent. A script can read everything exposed by its repository mount. Register only dedicated, reviewed roots.
+An enabled repository must therefore be considered entirely visible and writable by the Agent after execution is approved. Register only dedicated, reviewed repositories and do not include production credentials, private keys, or unrelated sensitive files.
 
 ## Execution approval
 
-- **Interactive:** every shell, URL, and private-script call waits for the owner.
-- **Session scoped:** selected capability groups auto-approve for one conversation.
-- **Allow all:** all three capability groups auto-approve in the configured execution backend.
+- **Interactive:** every shell, URL, and private-script request waits for the Session owner.
+- **Session scoped:** selected capability groups are automatically approved for one Session.
+- **Allow all:** shell, URL, and private-script requests run without additional prompts.
 
-In container mode, no approval mode can enable repository writes, host access, Docker access, privileged containers, or private-network destinations. In local mode, approval controls when execution starts but does not restrict what the resulting host process can access. Approval requests expire after five minutes and are denied on stop, logout, deletion, or Worker shutdown.
+Approval requests expire after five minutes and are denied on stop, logout, deletion, or Worker shutdown. Approval only decides whether execution starts; it is not a security boundary around the resulting process. `Allow all` should be reserved for fully trusted users and repositories.
 
-## Network policy
+## Network behavior
 
-The Compose sandbox network is marked internal. Proxy-aware command-line tools reach the internet only through Squid, which rejects private, loopback, link-local, carrier-grade NAT, and metadata ranges. The dedicated URL tool also resolves and validates its target before fetching, disables redirects, and caps response size.
+The dedicated URL tool resolves and validates public HTTP/HTTPS targets, rejects loopback, private, link-local, carrier-grade NAT and metadata addresses, disables redirects, and caps response size.
 
-Local-mode shell commands and scripts use the host network directly and are not limited by the dedicated URL tool's filtering. They may access local services, private networks, and public endpoints available to the host user.
-
-Applications that ignore `HTTP_PROXY`, create raw sockets, or implement unusual DNS behavior cannot reach the public internet from the internal Docker network. Keep the internal network isolated and do not attach application/database services to it.
+Shell commands and private scripts use the host network directly. They can access destinations that the dedicated URL tool would reject and may transmit repository or host data elsewhere. Apply host firewall, proxy, account, and network policies outside CopilotDeck when restrictions are required.
 
 ## Operational guidance
 
-- Use rootless Docker or Podman; never mount a privileged system daemon socket.
-- Terminate TLS in front of both Web and API services before exposing the application beyond localhost.
-- Rotate `COOKIE_SECRET`, `TOKEN_ENCRYPTION_KEY`, `SANDBOX_RUNNER_TOKEN`, and `WORKER_CONTROL_TOKEN` through an established secret-management process.
-- Keep the local Worker control endpoint bound to loopback. Do not proxy or expose port 4200.
-- In local mode, protect and back up `data/copilot.db` together with `data/copilot/`; stop the API and Worker or use a SQLite-aware online backup so the WAL is not omitted.
-- Review Squid logs and `AuditLog` records; neither should contain OAuth tokens.
-- Keep `ALLOW_ALL` exceptional and communicate that it permits data exfiltration to public URLs.
-- Revoke the GitHub App authorization and remove application web sessions when a user leaves the allowed organization.
+- Run the application with a dedicated low-privilege operating-system account.
+- Keep API, Local Execution Runner, and Worker control ports on loopback; expose only the Web endpoint through a trusted HTTPS reverse proxy when remote access is required.
+- Rotate `COOKIE_SECRET`, `TOKEN_ENCRYPTION_KEY`, `SANDBOX_RUNNER_TOKEN`, and `WORKER_CONTROL_TOKEN` using an established secret-management process.
+- Protect and back up `data/copilot.db` together with `data/copilot/`; stop the services or use a SQLite-aware online backup so the WAL is not omitted.
+- Review `AuditLog` records without copying OAuth tokens or sensitive command output into external logging systems.
+- Revoke GitHub App authorization and remove Web Sessions when a user leaves the allowed organization.
 
 ## Reporting
 
-Do not include credentials, repository content, or command output in a vulnerability report. Include the affected component, reproduction steps using synthetic data, and expected versus observed isolation behavior.
+Do not include credentials, repository contents, or command output in a vulnerability report. Use synthetic data and include the affected component, reproduction steps, and expected versus observed behavior.

@@ -13,13 +13,8 @@ for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_RO
 }
 
 process.env.NODE_ENV = "production";
-process.env.SANDBOX_BACKEND ??= "local";
 process.env.WORKER_CONCURRENCY ??= "2";
 process.env.API_INTERNAL_URL ??= "http://127.0.0.1:4000";
-
-if (process.env.SANDBOX_BACKEND !== "local") {
-  throw new Error("start:local requires SANDBOX_BACKEND=local");
-}
 
 const webBuild = path.join(root, "apps/web/.next");
 const webStandalone = path.join(webBuild, "standalone");

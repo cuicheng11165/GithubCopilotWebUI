@@ -31,7 +31,6 @@ const env = z.object({
   COPILOT_HOME: z.string().default("./data/copilot"),
   SANDBOX_RUNNER_URL: z.string().url().default("http://127.0.0.1:4100"),
   SANDBOX_RUNNER_TOKEN: z.string().min(32),
-  SANDBOX_BACKEND: z.enum(["local", "container"]).default("local"),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(8),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300)
 }).parse(process.env);
@@ -111,10 +110,6 @@ async function sandboxRequest<T>(pathname: string, body?: unknown): Promise<T> {
   const result = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(result.error ?? `Sandbox runner returned ${response.status}`);
   return result;
-}
-
-function quote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 async function prepareSkillView(sessionId: string, skills: Awaited<ReturnType<typeof scanSkills>>): Promise<string[]> {
@@ -219,12 +214,6 @@ const rawSchemas = {
 } as const;
 
 function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>[] {
-  const shellDescription = env.SANDBOX_BACKEND === "local"
-    ? "Execute a shell command directly on the CopilotDeck host as its current operating-system user. The command can modify the repository and access other host resources."
-    : "Execute a shell command in an isolated container with the repository mounted read-only.";
-  const scriptDescription = env.SANDBOX_BACKEND === "local"
-    ? "Run a script stored in the repository or one of its private skills directly on the CopilotDeck host without isolation."
-    : "Run a script stored in the repository or one of its private skills inside the isolated read-only sandbox.";
   return [
     defineTool<{ path?: string; depth?: number }>("repo_tree", {
       description: "List files and directories in the configured live repository.", parameters: rawSchemas.tree, skipPermission: true, defer: "never",
@@ -243,7 +232,7 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: () => getGitInfo(repository)
     }),
     defineTool<{ command: string; intention: string }>("execute_shell", {
-      description: shellDescription, parameters: rawSchemas.shell, defer: "never",
+      description: "Execute a shell command directly on the CopilotDeck host as its current operating-system user. The command can modify the repository and access other host resources.", parameters: rawSchemas.shell, defer: "never",
       handler: ({ command }) => sandboxRequest("/execute", { repositoryId: repository.id, sessionId, command })
     }),
     defineTool<{ url: string; intention: string }>("fetch_url", {
@@ -251,35 +240,29 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: ({ url }) => sandboxRequest("/fetch", { url, maxBytes: 1_000_000 })
     }),
     defineTool<{ script: string; args?: string[]; interpreter?: "direct" | "shell" | "node" | "python"; intention: string }>("run_private_script", {
-      description: scriptDescription, parameters: rawSchemas.script, defer: "never",
+      description: "Run a script stored in the repository or one of its private skills directly on the CopilotDeck host without isolation.", parameters: rawSchemas.script, defer: "never",
       handler: async ({ script, args = [], interpreter = "direct" }) => {
         const absolute = await resolveRepositoryPath(repository, script);
         const relative = path.relative(repository.canonicalPath, absolute);
-        if (env.SANDBOX_BACKEND === "local") {
-          const executable = interpreter === "shell"
-            ? (process.platform === "win32" ? "powershell.exe" : "/bin/sh")
-            : interpreter === "node"
-              ? "node"
-              : interpreter === "python"
-                ? (process.platform === "win32" ? "python" : "python3")
-                : absolute;
-          const executableArgs = interpreter === "shell" && process.platform === "win32"
-            ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", absolute, ...args]
-            : interpreter === "direct"
-              ? args
-              : [absolute, ...args];
-          return sandboxRequest("/execute", {
-            repositoryId: repository.id,
-            sessionId,
-            command: `Run private script ${relative}`,
-            executable,
-            args: executableArgs
-          });
-        }
-        const executable = interpreter === "shell" ? "/bin/sh" : interpreter === "node" ? "node" : interpreter === "python" ? "python3" : "";
-        const portableRelative = relative.split(path.sep).join("/");
-        const command = [executable, `./${portableRelative}`, ...args].filter(Boolean).map(quote).join(" ");
-        return sandboxRequest("/execute", { repositoryId: repository.id, sessionId, command });
+        const executable = interpreter === "shell"
+          ? (process.platform === "win32" ? "powershell.exe" : "/bin/sh")
+          : interpreter === "node"
+            ? "node"
+            : interpreter === "python"
+              ? (process.platform === "win32" ? "python" : "python3")
+              : absolute;
+        const executableArgs = interpreter === "shell" && process.platform === "win32"
+          ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", absolute, ...args]
+          : interpreter === "direct"
+            ? args
+            : [absolute, ...args];
+        return sandboxRequest("/execute", {
+          repositoryId: repository.id,
+          sessionId,
+          command: `Run private script ${relative}`,
+          executable,
+          args: executableArgs
+        });
       }
     })
   ];
@@ -322,9 +305,7 @@ async function runTurn(job: TurnJobLike) {
       enableSkills: true,
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },
-      systemMessage: { mode: "append" as const, content: env.SANDBOX_BACKEND === "local"
-        ? "You are working with a live repository. SDK write/edit tools are disabled, but approved shell commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Use repository tools for reading and clearly report any command that changes files."
-        : "You are working with a live repository. The repository is strictly read-only. Never claim to have modified files. Use the provided repository tools for reading, and the controlled shell, URL, or private-script tools when needed. Commands run in an isolated container and may only write under temporary directories." },
+      systemMessage: { mode: "append" as const, content: "You are working with a live repository. SDK write/edit tools are disabled, but approved shell commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Use repository tools for reading and clearly report any command that changes files." },
       onPermissionRequest: permissionHandler(turn.session.id, turn.id)
     };
     const metadata = await client.getSessionMetadata(turn.session.sdkSessionId);

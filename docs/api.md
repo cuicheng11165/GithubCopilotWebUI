@@ -14,7 +14,7 @@ All application routes are under `/api`. Browser authentication uses the `copilo
 | GET/POST | `/sessions` | List or create conversations |
 | GET/PATCH/DELETE | `/sessions/:id` | Read, rename/configure, or permanently delete |
 | POST | `/sessions/:id/messages` | Queue a turn; requires `Idempotency-Key` |
-| POST | `/sessions/:id/stop` | Stop queued/running turns and sandboxes |
+| POST | `/sessions/:id/stop` | Stop queued or running turns and local processes |
 | GET | `/sessions/:id/events` | Replayable SSE stream; accepts `Last-Event-ID` |
 | POST | `/sessions/:id/permissions/:requestId/respond` | `approve-once` or `deny` |
 

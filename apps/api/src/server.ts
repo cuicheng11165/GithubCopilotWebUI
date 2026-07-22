@@ -139,12 +139,6 @@ app.get("/api/me", async (request, reply) => {
   };
 });
 
-app.get("/api/runtime", async (request, reply) => {
-  const auth = await authenticate(request, reply);
-  if (!(auth && "user" in auth)) return;
-  return { sandboxBackend: config.SANDBOX_BACKEND };
-});
-
 app.post("/api/auth/logout", async (request, reply) => {
   const auth = await authenticate(request, reply);
   if (!(auth && "user" in auth)) return;

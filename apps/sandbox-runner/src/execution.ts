@@ -19,20 +19,11 @@ interface BaseExecutionInput {
   maxOutputBytes: number;
 }
 
-export interface LocalExecutionInput extends BaseExecutionInput {
+export interface ExecutionInput extends BaseExecutionInput {
   repositoryPath: string;
   tempRoot: string;
   executable?: string;
   args?: string[];
-}
-
-export interface ContainerExecutionInput extends BaseExecutionInput {
-  containerName: string;
-  repositoryPath: string;
-  runtime: "docker" | "podman";
-  image: string;
-  network: string;
-  httpProxy?: string;
 }
 
 interface CaptureState {
@@ -110,13 +101,12 @@ async function waitForChild(child: ChildProcess, state: CaptureState, timeoutSec
 }
 
 export class ExecutionManager {
-  private readonly localProcesses = new Map<string, Set<ChildProcess>>();
-  private readonly containers = new Map<string, Set<{ name: string; runtime: "docker" | "podman" }>>();
+  private readonly processes = new Map<string, Set<ChildProcess>>();
 
-  async executeLocal(input: LocalExecutionInput): Promise<ExecutionResult> {
+  async execute(input: ExecutionInput): Promise<ExecutionResult> {
     await mkdir(input.tempRoot, { recursive: true });
     const tempDirectory = await mkdtemp(path.join(input.tempRoot, `${input.sessionId}-`));
-    const processes = this.localProcesses.get(input.sessionId) ?? new Set<ChildProcess>();
+    const processes = this.processes.get(input.sessionId) ?? new Set<ChildProcess>();
     const invocation = input.executable
       ? { executable: input.executable, args: input.args ?? [] }
       : localShellCommand(input.command);
@@ -142,7 +132,7 @@ export class ExecutionManager {
       }
     });
     processes.add(child);
-    this.localProcesses.set(input.sessionId, processes);
+    this.processes.set(input.sessionId, processes);
     const state: CaptureState = { stdout: "", stderr: "", truncated: false };
     child.stdout?.on("data", (chunk: Buffer) => capture(state, "stdout", chunk, input.maxOutputBytes));
     child.stderr?.on("data", (chunk: Buffer) => capture(state, "stderr", chunk, input.maxOutputBytes));
@@ -150,59 +140,20 @@ export class ExecutionManager {
       return await waitForChild(child, state, input.timeoutSeconds, () => terminateProcess(child));
     } finally {
       processes.delete(child);
-      if (processes.size === 0) this.localProcesses.delete(input.sessionId);
+      if (processes.size === 0) this.processes.delete(input.sessionId);
       await rm(tempDirectory, { recursive: true, force: true });
     }
   }
 
-  async executeContainer(input: ContainerExecutionInput): Promise<ExecutionResult> {
-    const containers = this.containers.get(input.sessionId) ?? new Set<{ name: string; runtime: "docker" | "podman" }>();
-    const record = { name: input.containerName, runtime: input.runtime };
-    containers.add(record);
-    this.containers.set(input.sessionId, containers);
-    const args = [
-      "run", "--rm", "--name", input.containerName,
-      "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-      "--pids-limit=128", "--memory=1g", "--cpus=1.5",
-      "--network", input.network,
-      "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
-      "--mount", `type=bind,src=${input.repositoryPath},dst=/repo,readonly`,
-      "--workdir", "/repo", "--user", "65532:65532",
-      "--env", "HOME=/tmp", "--env", "XDG_CACHE_HOME=/tmp/cache",
-      ...(input.httpProxy ? ["--env", `HTTP_PROXY=${input.httpProxy}`, "--env", `HTTPS_PROXY=${input.httpProxy}`, "--env", `http_proxy=${input.httpProxy}`, "--env", `https_proxy=${input.httpProxy}`, "--env", "NO_PROXY=", "--env", "no_proxy="] : []),
-      input.image, "/bin/sh", "-lc", input.command
-    ];
-    const child = spawn(input.runtime, args, { stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH } });
-    const state: CaptureState = { stdout: "", stderr: "", truncated: false };
-    child.stdout?.on("data", (chunk: Buffer) => capture(state, "stdout", chunk, input.maxOutputBytes));
-    child.stderr?.on("data", (chunk: Buffer) => capture(state, "stderr", chunk, input.maxOutputBytes));
-    const removeContainer = () => {
-      const cleanup = spawn(input.runtime, ["rm", "-f", input.containerName], { stdio: "ignore", env: { PATH: process.env.PATH } });
-      cleanup.unref();
-    };
-    try {
-      return await waitForChild(child, state, input.timeoutSeconds, removeContainer);
-    } finally {
-      containers.delete(record);
-      if (containers.size === 0) this.containers.delete(input.sessionId);
-    }
-  }
-
   async stop(sessionId: string): Promise<number> {
-    const processes = [...(this.localProcesses.get(sessionId) ?? [])];
-    const containers = [...(this.containers.get(sessionId) ?? [])];
+    const processes = [...(this.processes.get(sessionId) ?? [])];
     await Promise.all(processes.map(async (child) => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = once(child, "exit").catch(() => undefined);
       terminateProcess(child);
       await exited;
     }));
-    await Promise.all(containers.map(async ({ name, runtime }) => {
-      const child = spawn(runtime, ["rm", "-f", name], { stdio: "ignore", env: { PATH: process.env.PATH } });
-      await once(child, "exit").catch(() => undefined);
-    }));
-    this.localProcesses.delete(sessionId);
-    this.containers.delete(sessionId);
-    return processes.length + containers.length;
+    this.processes.delete(sessionId);
+    return processes.length;
   }
 }

@@ -13,8 +13,7 @@ const repositoryConfigSchema = z.object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]{0,99}$/),
     displayName: z.string().min(1).max(120),
     path: z.string().min(1),
-    enabled: z.boolean().default(true),
-    sandboxImage: z.string().regex(/^[a-z0-9][a-z0-9._\/:@-]{0,254}$/i, "Invalid sandbox image reference").optional()
+    enabled: z.boolean().default(true)
   })).min(1)
 });
 
@@ -24,7 +23,6 @@ export interface RepositoryConfig {
   path: string;
   canonicalPath: string;
   enabled: boolean;
-  sandboxImage: string | undefined;
 }
 
 export interface GitInfo {
@@ -75,7 +73,7 @@ export class RepositoryRegistry {
       if (!(await stat(canonicalPath)).isDirectory()) throw new Error(`Repository ${item.id} path is not a directory`);
       if (next.has(item.id)) throw new Error(`Duplicate repository id: ${item.id}`);
       if (paths.has(canonicalPath)) throw new Error(`Duplicate repository path: ${canonicalPath}`);
-      next.set(item.id, { ...item, canonicalPath, sandboxImage: item.sandboxImage });
+      next.set(item.id, { ...item, canonicalPath });
       paths.add(canonicalPath);
     }
 

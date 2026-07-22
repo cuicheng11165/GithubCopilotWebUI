@@ -9,7 +9,6 @@ const envSchema = z.object({
   WORKER_CONTROL_URL: z.string().url().default("http://127.0.0.1:4200"),
   WORKER_CONTROL_TOKEN: z.string().min(32),
   EVENT_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
-  SANDBOX_BACKEND: z.enum(["local", "container"]).default("local"),
   COOKIE_SECRET: z.string().min(32),
   TOKEN_ENCRYPTION_KEY: z.string().min(32),
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),

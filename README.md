@@ -1,43 +1,37 @@
 # CopilotDeck
 
-A locally deployed, multi-user web interface for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured live repositories, with per-user GitHub identity, resumable Copilot sessions, streaming responses, and controlled command, URL, and private-script execution.
+CopilotDeck is a locally deployed, multi-user Web UI for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured repositories, with per-user GitHub identity, multiple Sessions, streaming responses, and approved command, URL, and private-script execution.
 
-## What is implemented
+## Features
 
-- GitHub.com plus one optional GitHub Enterprise Cloud OAuth provider.
-- Organization allowlists and per-user encrypted GitHub App tokens.
+- GitHub.com and one optional GitHub Enterprise Cloud OAuth provider.
+- Organization or enterprise membership allowlists and encrypted GitHub App user tokens.
 - Multiple concurrent conversations per user with strict ownership checks.
 - Create, switch, rename, and permanently delete conversations.
-- Live repository reads, Git status, text search, and automatic skill discovery from `.github/skills`, `.agents/skills`, and `.claude/skills`.
-- Three execution policies: Interactive, Session scoped, and Allow all.
-- Selectable local-process or container execution for shell commands and private scripts.
-- Controlled public URL fetching and an egress proxy for sandboxed commands.
-- SQLite-native task coordination, resumable SDK state, idempotent turns, and replayable SSE events.
+- Live repository reads, Git status, text search, and skill discovery from `.github/skills`, `.agents/skills`, and `.claude/skills`.
+- Interactive, Session scoped, and Allow all execution approval modes.
+- Local shell commands, controlled public URL requests, and repository private scripts.
+- SQLite-backed task coordination, resumable Copilot SDK state, idempotent turns, and replayable SSE events.
 
 ## Architecture
 
 ```text
-Browser -> Next.js -> Fastify API -> SQLite queue/event polling
-                                  -> Worker -> Copilot SDK runtime
-                                             -> Sandbox Runner -> local host process
-                                                               -> or rootless container + egress proxy
+Browser -> Next.js -> Fastify API -> SQLite
+                                  -> Worker -> Copilot SDK
+                                             -> Local Execution Runner
 ```
 
-The Worker starts the bundled Copilot runtime in `mode: "empty"`. Only explicitly registered tools are visible. SDK write tools are always denied. Container mode also mounts the repository read-only; local mode deliberately does not provide an operating-system isolation boundary.
+The Worker starts the Copilot runtime in `mode: "empty"` and exposes only the application tools. SDK write/edit tools are rejected. Approved shell commands and private scripts run directly as the operating-system user that started CopilotDeck.
 
-## Storage and coordination
-
-CopilotDeck uses one SQLite database in WAL mode for users, encrypted GitHub tokens, Sessions, messages, queued turns, approvals, events, and audit logs. The Worker atomically claims queued rows and polls approval/cancellation state. Copilot SDK state is stored under `./data/copilot/`. See [docs/storage.md](./docs/storage.md) for backup details.
-
-This architecture is intended for one CopilotDeck installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal application replicas and network-mounted database files are not.
+CopilotDeck is designed for one installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal replicas and network-mounted SQLite files are not.
 
 ## Prerequisites
 
 - Node.js 22 or newer and pnpm 11.
-- Docker with Compose v2 is optional and only needed for Compose or isolated container execution.
+- `git` and `rg` (ripgrep) on `PATH`.
 - A GitHub App on GitHub.com and, optionally, a second GitHub App on the configured GHE Cloud host.
 - Copilot entitlement and Copilot CLI enabled for every user.
-- One or more local repositories that do not contain production secrets.
+- One or more trusted local repositories.
 
 GitHub Enterprise Server is not supported by Copilot. `GHE_HOST` must refer to GitHub Enterprise Cloud with data residency.
 
@@ -46,18 +40,18 @@ GitHub Enterprise Server is not supported by Copilot. `GHE_HOST` must refer to G
 Create separate GitHub Apps for GitHub.com and GHE Cloud. Configure:
 
 - Homepage URL: `http://localhost:3000`
-- Callback URL for GitHub.com: `http://localhost:3000/api/auth/github/callback`
-- Callback URL for GHE: `http://localhost:3000/api/auth/ghe/callback`
+- GitHub.com callback: `http://localhost:3000/api/auth/github/callback`
+- GHE callback: `http://localhost:3000/api/auth/ghe/callback`
 - User authorization enabled.
 - Organization members read permission when organization membership is enforced.
 - The minimum Copilot Requests permission offered by the host.
-- No repository contents permission is needed.
+- No repository contents permission.
 
-Install the App on each organization named in `GITHUB_ALLOWED_ORGS` or `GHE_ALLOWED_ORGS`. Enterprise slugs can instead be supplied through `GITHUB_ALLOWED_ENTERPRISES` or `GHE_ALLOWED_ENTERPRISES`; grant the App enterprise-members read access. The application fails closed when none of the configured memberships can be proven.
+Install the App on each organization named in `GITHUB_ALLOWED_ORGS` or `GHE_ALLOWED_ORGS`. Enterprise slugs can instead be supplied through `GITHUB_ALLOWED_ENTERPRISES` or `GHE_ALLOWED_ENTERPRISES`; grant the App enterprise-members read access. Authentication fails closed when configured membership cannot be verified.
 
 ## Configure repositories
 
-Copy the example and use absolute host paths:
+Copy `config/repositories.example.yaml` to `config/repositories.yaml` and use absolute local paths:
 
 ```yaml
 repositories:
@@ -65,27 +59,11 @@ repositories:
     displayName: Platform API
     path: /Users/example/code/platform-api
     enabled: true
-    sandboxImage: copilot-web-sandbox:local
 ```
 
-The same absolute path must be mounted at the same location inside the API, Worker, and Sandbox Runner containers. For the first repository, set `REPO_ROOT` to that path. For additional repositories, add equivalent self-bind mounts in a Compose override:
+Repository configuration reloads automatically. Invalid updates are rejected while the last valid configuration remains active. Registered repositories and their skills are visible to every authenticated, authorized user.
 
-```yaml
-services:
-  api:
-    volumes: [/another/repo:/another/repo:ro]
-  worker:
-    volumes: [/another/repo:/another/repo:ro]
-  sandbox-runner:
-    volumes: [/another/repo:/another/repo:ro]
-```
-
-Repository configuration reloads automatically. Invalid updates are rejected while the last valid registry remains active.
-`sandboxImage` is ignored when `SANDBOX_BACKEND=local`. In container mode, every configured image must also appear in the comma-separated `SANDBOX_ALLOWED_IMAGES` environment variable. Only prebuilt, administrator-reviewed local images should be allowlisted.
-
-## Run without Docker
-
-This is the simplest single-machine deployment. Application data, queued turns, approvals, cancellation state, and replayable events use SQLite. No external database, queue service, Docker, or Podman is required. Shell commands/private scripts run directly as the user that started CopilotDeck.
+## Install and run
 
 Create the configuration:
 
@@ -94,11 +72,10 @@ cp .env.example .env
 cp config/repositories.example.yaml config/repositories.yaml
 ```
 
-Set the repository to an absolute local path, configure the GitHub App values and secrets, and keep these native settings. Native installations also need `git` and `rg` (ripgrep) on `PATH`:
+Set the GitHub App values, generate independent service secrets, and configure each repository with an absolute path. The important local settings are:
 
 ```dotenv
 DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
-SANDBOX_BACKEND=local
 LOCAL_SANDBOX_TMP_ROOT=./data/local-sandbox
 WORKER_CONTROL_URL=http://127.0.0.1:4200
 WORKER_CONTROL_HOST=127.0.0.1
@@ -109,7 +86,7 @@ EVENT_POLL_INTERVAL_MS=200
 WORKER_CONCURRENCY=2
 ```
 
-Install, migrate, and run in development mode:
+Development:
 
 ```bash
 corepack pnpm install
@@ -117,33 +94,18 @@ pnpm db:migrate
 pnpm dev
 ```
 
-For a production build on the same machine:
+Production on the same machine:
 
 ```bash
 pnpm build
 pnpm start:local
 ```
 
-Open `http://localhost:3000`. The local starter launches Web, API, Worker, and sandbox-runner together and stops the group if one component exits. API-to-Worker control is bound to loopback and authenticated with `WORKER_CONTROL_TOKEN`. SSE and Worker state polling use their separately configurable intervals.
+Open `http://localhost:3000`. The production starter launches Web, API, Worker, and Local Execution Runner together and stops the whole group if one component exits. Internal control endpoints bind to loopback and require independent bearer tokens.
 
-> **No isolation in local execution mode:** approved commands and private scripts can modify the repository, read any host file available to the current user, start processes, and access the host network. Interactive and Session scoped approvals control when a process starts; they do not restrict the process after launch. Do not expose this mode to untrusted users.
+### Windows
 
-### Windows native deployment
-
-Use 64-bit Node.js 22 or newer, Git for Windows, and ripgrep from PowerShell. Windows paths may use forward slashes, which avoids `.env` and YAML escaping issues:
-
-For complete native, Docker Desktop, service startup, backup, upgrade, and troubleshooting instructions, see the [Windows deployment guide](./docs/windows-deployment.md).
-
-```powershell
-Copy-Item .env.example .env
-Copy-Item config/repositories.example.yaml config/repositories.yaml
-corepack pnpm install
-corepack pnpm db:migrate
-corepack pnpm build
-corepack pnpm start:local
-```
-
-For example, native `config/repositories.yaml` can contain:
+Use 64-bit Node.js 22 or newer, Git for Windows, and ripgrep from PowerShell. Repository paths may use forward slashes:
 
 ```yaml
 repositories:
@@ -153,76 +115,11 @@ repositories:
     enabled: true
 ```
 
-Generate values for the four service secrets with Node, changing `48` to `32` for `TOKEN_ENCRYPTION_KEY`:
+Shell commands use `cmd.exe`. Private scripts marked `interpreter: shell` use Windows PowerShell; Node and Python scripts use their native interpreters. See the [Windows deployment guide](./docs/windows-deployment.md).
 
-```powershell
-node -e "console.log(require('node:crypto').randomBytes(48).toString('base64'))"
-```
+## Storage
 
-In Windows local mode, agent shell commands run through `cmd.exe`. Private scripts with `interpreter: shell` run through Windows PowerShell; Node and Python private scripts are launched directly without shell quoting. Stopping or timing out a command terminates its Windows process tree.
-
-## Run with Docker Compose
-
-```bash
-cp .env.example .env
-cp config/repositories.example.yaml config/repositories.yaml
-```
-
-Generate secrets:
-
-```bash
-openssl rand -base64 48  # COOKIE_SECRET
-openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
-openssl rand -base64 48  # SANDBOX_RUNNER_TOKEN
-openssl rand -base64 48  # WORKER_CONTROL_TOKEN
-```
-
-Set `REPO_ROOT`, `REPOSITORIES_CONFIG_FILE`, GitHub App credentials, and organization allowlists in `.env`, then run:
-
-```bash
-docker compose up --build
-```
-
-Open `http://localhost:3000`. API health is available at `http://localhost:4000/health/ready`.
-
-### Windows deployment with Docker Desktop
-
-Use Docker Desktop in Linux-container mode. Keep the repository's container path separate from its Windows host path in `.env`:
-
-```dotenv
-REPO_ROOT=/repo
-REPO_HOST_PATH=C:/src/example
-REPO_CONTAINER_PATH=/repo
-REPOSITORIES_CONFIG_FILE=./config/repositories.yaml
-```
-
-For this Compose deployment, set the repository `path` in `config/repositories.yaml` to `/repo`. Then run `docker compose up --build` from PowerShell. Compose mounts `C:/src/example` read-only at `/repo` in the Linux API, Worker, and Sandbox Runner containers. The default `/var/run/docker.sock` setting is intended for Docker Desktop's Linux engine.
-
-The first run creates:
-
-```text
-data/
-├── copilot.db        # Users, web sessions, conversations, messages and events
-├── copilot.db-shm    # SQLite runtime file
-├── copilot.db-wal    # SQLite write-ahead log
-└── copilot/          # Copilot SDK session state
-```
-
-The Compose file limits Worker concurrency to two by default. Increase it only after testing the workload; SQLite still has a single writer even in WAL mode.
-
-For a rootless Docker daemon, set `CONTAINER_RUNTIME_SOCKET` to its socket, for example `/run/user/1000/docker.sock`. The Sandbox Runner is the only service that receives this socket.
-
-## Native development
-
-```bash
-corepack pnpm install
-pnpm db:migrate
-pnpm dev
-```
-
-`pnpm install` generates the SQLite Prisma Client. The relative database URL in `.env.example` is resolved from `packages/db/prisma-sqlite`. The default `SANDBOX_BACKEND=local` does not require a container runtime.
-
-The root `pnpm dev` command loads `.env` and normalizes repository and Copilot state paths before starting the workspace applications.
+SQLite stores users, encrypted tokens, Web Sessions, conversations, queued turns, approvals, events, and audit logs. Copilot SDK state is under `data/copilot/`; temporary execution homes are under `data/local-sandbox/`. See [docs/storage.md](./docs/storage.md) for backup and recovery.
 
 ## Verification
 
@@ -235,6 +132,8 @@ pnpm db:validate
 
 The Copilot SDK is pinned to `1.0.7`; upgrade it intentionally and rerun the compatibility build and tests.
 
-## Important security boundary
+## Security warning
 
-An enabled repository should be considered entirely visible to the Agent. In local execution mode, an approved command can also access other files available to the host user and can modify the repository. A private script can send content to an external endpoint depending on its own behavior and the host network. Do not use local mode with untrusted users or on a machine containing production credentials, private keys, or unrelated sensitive files. See [SECURITY.md](./SECURITY.md).
+There is no operating-system isolation boundary. Approved commands and private scripts can modify the selected repository, read any file available to the CopilotDeck process, start other processes, and use the host network. Approval modes control whether execution may begin; they cannot constrain a process after it starts.
+
+Run CopilotDeck with a dedicated low-privilege account, register only trusted repositories, keep internal ports on loopback, and do not expose the application to untrusted users. See [SECURITY.md](./SECURITY.md).

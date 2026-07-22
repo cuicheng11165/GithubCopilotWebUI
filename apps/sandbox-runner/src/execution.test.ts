@@ -16,7 +16,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-describe("ExecutionManager local backend", () => {
+describe("ExecutionManager", () => {
   it("selects the native command shell for Windows and Unix", () => {
     expect(localShellCommand("echo ok", "win32", { ComSpec: "C:\\Windows\\System32\\cmd.exe" })).toEqual({
       executable: "C:\\Windows\\System32\\cmd.exe",
@@ -30,7 +30,7 @@ describe("ExecutionManager local backend", () => {
     const tempRoot = await temporaryDirectory("copilotdeck-execution-");
     const manager = new ExecutionManager();
 
-    const result = await manager.executeLocal({
+    const result = await manager.execute({
       sessionId: "11111111-1111-4111-8111-111111111111",
       command: "node -e \"console.log(process.cwd()); console.log(process.env.HOME)\"",
       repositoryPath,
@@ -52,7 +52,7 @@ describe("ExecutionManager local backend", () => {
     const tempRoot = await temporaryDirectory("copilotdeck-execution-");
     const manager = new ExecutionManager();
 
-    const truncated = await manager.executeLocal({
+    const truncated = await manager.execute({
       sessionId: "22222222-2222-4222-8222-222222222222",
       command: "node -e \"process.stdout.write('1234567890')\"",
       repositoryPath,
@@ -60,7 +60,7 @@ describe("ExecutionManager local backend", () => {
       timeoutSeconds: 2,
       maxOutputBytes: 5
     });
-    const combined = await manager.executeLocal({
+    const combined = await manager.execute({
       sessionId: "66666666-6666-4666-8666-666666666666",
       command: "node -e \"process.stdout.write('1234'); process.stderr.write('5678')\"",
       repositoryPath,
@@ -68,7 +68,7 @@ describe("ExecutionManager local backend", () => {
       timeoutSeconds: 2,
       maxOutputBytes: 5
     });
-    const timedOut = await manager.executeLocal({
+    const timedOut = await manager.execute({
       sessionId: "33333333-3333-4333-8333-333333333333",
       command: "node -e \"setTimeout(() => {}, 5000)\"",
       repositoryPath,
@@ -92,7 +92,7 @@ describe("ExecutionManager local backend", () => {
     const script = path.join(repositoryPath, "private-script.cjs");
     await writeFile(script, "require('node:fs').writeFileSync('generated.txt', process.argv[2])\n");
 
-    const result = await manager.executeLocal({
+    const result = await manager.execute({
       sessionId: "55555555-5555-4555-8555-555555555555",
       command: "Run private script",
       executable: process.execPath,
@@ -112,7 +112,7 @@ describe("ExecutionManager local backend", () => {
     const tempRoot = await temporaryDirectory("copilotdeck-execution-");
     const manager = new ExecutionManager();
     const sessionId = "44444444-4444-4444-8444-444444444444";
-    const execution = manager.executeLocal({
+    const execution = manager.execute({
       sessionId,
       command: "node -e \"setTimeout(() => {}, 5000)\"",
       repositoryPath,

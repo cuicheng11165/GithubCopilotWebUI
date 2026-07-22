@@ -33,7 +33,6 @@ export async function apiWrite<T>(path: string, csrfToken: string, method: "POST
 }
 
 export const getMe = () => apiGet<AuthUser>("/api/me");
-export const getRuntime = () => apiGet<{ sandboxBackend: "local" | "container" }>("/api/runtime");
 export const getRepositories = () => apiGet<RepositorySummary[]>("/api/repositories");
 export const getModels = () => apiGet<ModelSummary[]>("/api/models");
 export const getSessions = () => apiGet<ChatSession[]>("/api/sessions");
