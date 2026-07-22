@@ -1,6 +1,6 @@
-# CopilotDeck
+# GithubCopilotWebUI
 
-CopilotDeck is a locally deployed, multi-user Web UI for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured repositories, with per-user GitHub identity, multiple Sessions, streaming responses, and approved command, URL, and private-script execution.
+GithubCopilotWebUI is a locally deployed, multi-user Web UI for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured repositories, with per-user GitHub identity, multiple Sessions, streaming responses, and approved command, URL, and private-script execution.
 
 ## Features
 
@@ -21,9 +21,9 @@ Browser -> Next.js -> Fastify API -> SQLite
                                              -> Local Execution Runner
 ```
 
-The Worker starts the Copilot runtime in `mode: "empty"` and exposes only the application tools. SDK write/edit tools are rejected. Approved shell commands and private scripts run directly as the operating-system user that started CopilotDeck.
+The Worker starts the Copilot runtime in `mode: "empty"` and exposes only the application tools. SDK write/edit tools are rejected. Approved shell commands and private scripts run directly as the operating-system user that started GithubCopilotWebUI.
 
-CopilotDeck is designed for one installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal replicas and network-mounted SQLite files are not.
+GithubCopilotWebUI is designed for one installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal replicas and network-mounted SQLite files are not.
 
 ## Prerequisites
 
@@ -134,6 +134,6 @@ The Copilot SDK is pinned to `1.0.7`; upgrade it intentionally and rerun the com
 
 ## Security warning
 
-There is no operating-system isolation boundary. Approved commands and private scripts can modify the selected repository, read any file available to the CopilotDeck process, start other processes, and use the host network. Approval modes control whether execution may begin; they cannot constrain a process after it starts.
+There is no operating-system isolation boundary. Approved commands and private scripts can modify the selected repository, read any file available to the GithubCopilotWebUI process, start other processes, and use the host network. Approval modes control whether execution may begin; they cannot constrain a process after it starts.
 
-Run CopilotDeck with a dedicated low-privilege account, register only trusted repositories, keep internal ports on loopback, and do not expose the application to untrusted users. See [SECURITY.md](./SECURITY.md).
+Run GithubCopilotWebUI with a dedicated low-privilege account, register only trusted repositories, keep internal ports on loopback, and do not expose the application to untrusted users. See [SECURITY.md](./SECURITY.md).

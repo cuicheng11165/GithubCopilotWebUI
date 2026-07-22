@@ -1,6 +1,6 @@
 # Security model
 
-CopilotDeck is a trusted-machine application without process or network isolation. Shell commands and private scripts run as the operating-system user that started the application. They can modify repositories, read other files available to that user, start processes, and access local, private, or public network destinations.
+GithubCopilotWebUI is a trusted-machine application without process or network isolation. Shell commands and private scripts run as the operating-system user that started the application. They can modify repositories, read other files available to that user, start processes, and access local, private, or public network destinations.
 
 ## Trust boundaries
 
@@ -29,7 +29,7 @@ Approval requests expire after five minutes and are denied on stop, logout, dele
 
 The dedicated URL tool resolves and validates public HTTP/HTTPS targets, rejects loopback, private, link-local, carrier-grade NAT and metadata addresses, disables redirects, and caps response size.
 
-Shell commands and private scripts use the host network directly. They can access destinations that the dedicated URL tool would reject and may transmit repository or host data elsewhere. Apply host firewall, proxy, account, and network policies outside CopilotDeck when restrictions are required.
+Shell commands and private scripts use the host network directly. They can access destinations that the dedicated URL tool would reject and may transmit repository or host data elsewhere. Apply host firewall, proxy, account, and network policies outside GithubCopilotWebUI when restrictions are required.
 
 ## Operational guidance
 
