@@ -7,8 +7,9 @@ CopilotDeck separates durable application records from runtime coordination and 
 | Users, encrypted GitHub tokens, web sessions | `data/copilot.db` | PostgreSQL |
 | Conversations, turns, messages, approvals, SSE events, audit logs | `data/copilot.db` | PostgreSQL |
 | Copilot SDK session state | `data/copilot/` | `copilot-state` Docker volume |
-| Queues, locks, cancellation and Pub/Sub | Redis | Redis |
-| Repository contents and skills | Live read-only mount | Live read-only mount |
+| Local execution temporary files | `data/local-sandbox/` | Not used by the container backend |
+| Queue, Session serialization, approvals, cancellation, event delivery | SQLite rows plus local polling | Redis/BullMQ and Pub/Sub |
+| Repository contents and skills | Live host directory; commands may modify it | Live read-only mount |
 
 ## Local mode
 
@@ -17,10 +18,11 @@ Set:
 ```dotenv
 DATABASE_MODE=local
 DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
+COORDINATION_BACKEND=local
 COPILOT_HOME=./data/copilot
 ```
 
-SQLite runs in WAL mode with foreign keys enabled, one connection per process, and a ten-second busy timeout. The API and Worker share the same database file. Local Compose defaults to two Worker jobs because SQLite serializes writers. This mode is not suitable for application replicas on different hosts or for a database file on NFS/network storage.
+SQLite runs in WAL mode with foreign keys enabled, one connection per process, and a ten-second busy timeout. The API and Worker share the same database file. Queued `Turn` rows replace BullMQ jobs; the Worker atomically claims them and uses database status for approval, cancellation, restart recovery, and same-Session serialization. SSE polls the event cursor at a configurable short interval. Local mode defaults to two Worker jobs because SQLite serializes writers. It is not suitable for multiple Worker processes, application replicas on different hosts, or a database file on NFS/network storage.
 
 Create or update the database with:
 

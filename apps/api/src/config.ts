@@ -3,9 +3,15 @@ import { z } from "zod";
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PUBLIC_APP_URL: z.string().url().default("http://localhost:3000"),
+  API_HOST: z.string().default("127.0.0.1"),
   API_PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().min(1),
+  COORDINATION_BACKEND: z.enum(["local", "redis"]).default("local"),
   REDIS_URL: z.string().min(1).default("redis://localhost:6379"),
+  LOCAL_WORKER_URL: z.string().url().default("http://127.0.0.1:4200"),
+  WORKER_CONTROL_TOKEN: z.string().min(32).optional(),
+  LOCAL_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
+  SANDBOX_BACKEND: z.enum(["local", "container"]).default("local"),
   COOKIE_SECRET: z.string().min(32),
   TOKEN_ENCRYPTION_KEY: z.string().min(32),
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),
@@ -21,6 +27,9 @@ const envSchema = z.object({
 });
 
 export const config = envSchema.parse(process.env);
+if (config.COORDINATION_BACKEND === "local" && !config.WORKER_CONTROL_TOKEN) {
+  throw new Error("WORKER_CONTROL_TOKEN with at least 32 characters is required for local coordination");
+}
 
 export interface OAuthProviderConfig {
   id: "github" | "ghe";

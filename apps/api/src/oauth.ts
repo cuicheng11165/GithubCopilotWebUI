@@ -28,7 +28,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     const provider = oauthProviders.find((item) => item.id === request.params.provider);
     if (!provider) return reply.code(404).send({ error: "Unknown provider" });
     const state = randomToken();
-    await app.redis.set(`oauth-state:${state}`, provider.id, "EX", 600);
+    await app.ephemeral.set(`oauth-state:${state}`, provider.id, 600);
     reply.setCookie(OAUTH_STATE_COOKIE, state, {
       path: "/api/auth",
       httpOnly: true,
@@ -51,7 +51,7 @@ export function registerOAuthRoutes(app: FastifyInstance): void {
     }
     if (request.cookies[OAUTH_STATE_COOKIE] !== request.query.state) return reply.redirect(`${config.PUBLIC_APP_URL}/login?error=invalid_state`);
     reply.clearCookie(OAUTH_STATE_COOKIE, { path: "/api/auth" });
-    const stateProvider = await app.redis.getdel(`oauth-state:${request.query.state}`);
+    const stateProvider = await app.ephemeral.take(`oauth-state:${request.query.state}`);
     if (stateProvider !== provider.id) return reply.redirect(`${config.PUBLIC_APP_URL}/login?error=invalid_state`);
 
     const tokenResponse = await fetch(`${provider.webBaseUrl}/login/oauth/access_token`, {

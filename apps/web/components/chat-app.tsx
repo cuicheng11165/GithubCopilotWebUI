@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Github, LoaderCircle, LogOut, Menu, Pencil, Plus, Send, ShieldAlert, Square, Trash2, X } from "lucide-react";
 import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
-import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions } from "../lib/api";
+import { ApiError, apiWrite, getMe, getModels, getRepositories, getRuntime, getSession, getSessions } from "../lib/api";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
 import { PermissionCard } from "./permission-card";
@@ -17,6 +17,7 @@ export function ChatApp() {
   const [skills, setSkills] = useState<Array<{ name: string; warning: string | null }>>([]);
   const [repositories, setRepositories] = useState<RepositorySummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([{ id: "auto", name: "Auto", supportsReasoning: false }]);
+  const [sandboxBackend, setSandboxBackend] = useState<"local" | "container">("local");
   const [showCreate, setShowCreate] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draft, setDraft] = useState("");
@@ -31,8 +32,8 @@ export function ChatApp() {
   useEffect(() => { void (async () => {
     try {
       const user = await getMe(); setMe(user);
-      const [sessionData, repositoryData] = await Promise.all([getSessions(), getRepositories()]);
-      setSessions(sessionData); setRepositories(repositoryData); setActiveId(sessionData[0]?.id ?? null);
+      const [sessionData, repositoryData, runtimeData] = await Promise.all([getSessions(), getRepositories(), getRuntime()]);
+      setSessions(sessionData); setRepositories(repositoryData); setSandboxBackend(runtimeData.sandboxBackend); setActiveId(sessionData[0]?.id ?? null);
       void getModels().then(setModels).catch(() => undefined);
     } catch (caught) { if (caught instanceof ApiError && caught.status === 401) window.location.href = "/login"; else setError(caught instanceof Error ? caught.message : "Failed to load the app"); }
   })(); }, []);
@@ -66,7 +67,9 @@ export function ChatApp() {
     ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "turn.completed", "turn.failed", "turn.stopped", "session.updated"].forEach((kind) => events.addEventListener(kind, handle));
     return () => events.close();
   }, [activeId, refreshSessions]);
-  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, streaming, permissions]);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streaming, permissions]);
 
   if (!me) return <div className="app-loading"><div className="brand-mark"><Bot size={24} /></div><span>Loading workspace…</span></div>;
 
@@ -109,14 +112,15 @@ export function ChatApp() {
     </aside>
     <section className="chat-panel">
       <header className="chat-header"><button className="icon-button" onClick={() => setSidebarOpen((value) => !value)}><Menu size={19} /></button>{active ? <><div className="header-title"><strong>{active.title}</strong><span>{active.repositoryName} · {active.branch ?? "live"} {active.headSha ? `@ ${active.headSha.slice(0, 8)}` : ""}{active.dirty ? " · modified" : ""}</span></div><div className="header-controls"><select aria-label="Approval mode" className={`mode-pill mode-select ${active.approvalMode === "allow-all" ? "danger" : ""}`} value={active.approvalMode} onChange={(event) => void updateSession(active, { approvalMode: event.target.value, approvalScopes: event.target.value === "session-scoped" ? active.approvalScopes : [] })}><option value="interactive">interactive</option><option value="session-scoped">session-scoped</option><option value="allow-all">allow-all</option></select><select aria-label="Model" className="model-pill model-select" value={active.model} onChange={(event) => void updateSession(active, { model: event.target.value })}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div></> : <div className="header-title"><strong>Copilot Workspace</strong><span>Select or create a conversation</span></div>}</header>
-      {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run sandboxed commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
+      {sandboxBackend === "local" && <div className="local-execution-banner"><ShieldAlert size={15} /> Local execution is not isolated. Approved commands and scripts can modify repositories and access host files.</div>}
+      {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run approved commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
         {active.approvalMode === "allow-all" && <div className="allow-all-banner"><ShieldAlert size={15} /> Allow all is active. Commands, public URL requests, and private scripts run without approval.</div>}
         {active.approvalMode === "session-scoped" && <div className="session-scope-bar"><span>Auto approve for this session:</span>{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={active.approvalScopes.includes(scope)} onChange={() => void updateSession(active, { approvalScopes: active.approvalScopes.includes(scope) ? active.approvalScopes.filter((item) => item !== scope) : [...active.approvalScopes, scope] })} />{scope === "private-script" ? "Private scripts" : scope === "url" ? "URL" : "Shell"}</label>)}</div>}
         <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>{messages.map((message) => <Message key={message.id} message={message} />)}{streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streaming + " ▍", createdAt: new Date().toISOString() }} />}{activeTool && <div className="tool-running"><LoaderCircle size={15} /> Running {activeTool}…</div>}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
-        <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${active.repositoryName}…`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>Repository is read-only · live working tree</span>{["running", "queued", "waiting-approval"].includes(active.status) ? <button className="send-button stop" aria-label="Stop" onClick={() => void apiWrite(`/api/sessions/${active.id}/stop`, me.csrfToken, "POST")}><Square size={14} fill="currentColor" /></button> : <button className="send-button" aria-label="Send" disabled={!draft.trim()} onClick={() => void send()}><Send size={17} /></button>}</div></div><p className="composer-note">Copilot can make mistakes. Review command output and URL destinations.</p></div>
+        <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${active.repositoryName}…`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>{sandboxBackend === "local" ? "Local execution · repository may be modified" : "Repository is read-only · isolated container"}</span>{["running", "queued", "waiting-approval"].includes(active.status) ? <button className="send-button stop" aria-label="Stop" onClick={() => void apiWrite(`/api/sessions/${active.id}/stop`, me.csrfToken, "POST")}><Square size={14} fill="currentColor" /></button> : <button className="send-button" aria-label="Send" disabled={!draft.trim()} onClick={() => void send()}><Send size={17} /></button>}</div></div><p className="composer-note">Copilot can make mistakes. Review command output and URL destinations.</p></div>
       </>}
     </section>
-    {showCreate && <NewSessionDialog repositories={repositories} models={models} onClose={() => setShowCreate(false)} onCreate={createSession} />}
+    {showCreate && <NewSessionDialog repositories={repositories} models={models} sandboxBackend={sandboxBackend} onClose={() => setShowCreate(false)} onCreate={createSession} />}
     {error && <div className="toast"><span>{error}</span><button onClick={() => setError(null)}><X size={15} /></button></div>}
   </main>;
 }

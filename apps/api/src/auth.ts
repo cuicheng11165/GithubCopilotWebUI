@@ -55,7 +55,7 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     return reply.code(401).send({ error: "GitHub authorization expired; please sign in again" });
   }
   const validationKey = `github-token-valid:${account.id}`;
-  if (!(await request.server.redis.get(validationKey))) {
+  if (!(await request.server.ephemeral.get(validationKey))) {
     const provider = oauthProviders.find((item) => item.id === account.provider);
     if (!provider) return reply.code(401).send({ error: "OAuth provider is no longer configured" });
     const response = await fetch(`${provider.apiBaseUrl}/user`, {
@@ -66,7 +66,7 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
       reply.clearCookie(SESSION_COOKIE, { path: "/" });
       return reply.code(401).send({ error: "GitHub authorization was revoked; please sign in again" });
     }
-    if (response.ok) await request.server.redis.set(validationKey, "1", "EX", 300);
+    if (response.ok) await request.server.ephemeral.set(validationKey, "1", 300);
   }
   void db.webSession.update({ where: { id: webSession.id }, data: { lastSeenAt: new Date() } });
   return {

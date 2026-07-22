@@ -26,9 +26,9 @@ const createClient = () => databaseMode === "local"
 export const db = (globalForPrisma.prisma ?? createClient()) as unknown as PostgreSqlPrismaClient;
 
 if (databaseMode === "local") {
-  await db.$queryRawUnsafe("PRAGMA journal_mode = WAL");
   await db.$queryRawUnsafe("PRAGMA busy_timeout = 10000");
   await db.$queryRawUnsafe("PRAGMA foreign_keys = ON");
+  await db.$queryRawUnsafe("PRAGMA journal_mode = WAL");
 }
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;

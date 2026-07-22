@@ -7,11 +7,12 @@ import type { ApprovalMode, ApprovalScope, ModelSummary, RepositorySummary } fro
 interface Props {
   repositories: RepositorySummary[];
   models: ModelSummary[];
+  sandboxBackend: "local" | "container";
   onClose: () => void;
   onCreate: (value: { repositoryId: string; model: string; approvalMode: ApprovalMode; approvalScopes: ApprovalScope[] }) => Promise<void>;
 }
 
-export function NewSessionDialog({ repositories, models, onClose, onCreate }: Props) {
+export function NewSessionDialog({ repositories, models, sandboxBackend, onClose, onCreate }: Props) {
   const [repositoryId, setRepositoryId] = useState(repositories[0]?.id ?? "");
   const [model, setModel] = useState("auto");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("interactive");
@@ -28,10 +29,10 @@ export function NewSessionDialog({ repositories, models, onClose, onCreate }: Pr
         {selected && <div className="repo-preview"><span className={`status-dot ${selected.dirty ? "amber" : "green"}`} /><div><strong>{selected.branch ?? "Not a Git repository"}</strong><small>{selected.headSha?.slice(0, 8) ?? "Live working directory"} · {selected.skills.length} skills</small></div></div>}
         <label>Model<select value={model} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <fieldset><legend>Execution approval</legend>
-          {(["interactive", "session-scoped", "allow-all"] as ApprovalMode[]).map((mode) => <label className="radio-row" key={mode}><input type="radio" name="mode" checked={approvalMode === mode} onChange={() => setApprovalMode(mode)} /><span><strong>{mode === "interactive" ? "Interactive" : mode === "session-scoped" ? "Session scoped" : "Allow all"}</strong><small>{mode === "interactive" ? "Confirm every shell, URL, and script action." : mode === "session-scoped" ? "Automatically allow selected capability groups." : "Automatically allow all sandboxed actions."}</small></span></label>)}
+          {(["interactive", "session-scoped", "allow-all"] as ApprovalMode[]).map((mode) => <label className="radio-row" key={mode}><input type="radio" name="mode" checked={approvalMode === mode} onChange={() => setApprovalMode(mode)} /><span><strong>{mode === "interactive" ? "Interactive" : mode === "session-scoped" ? "Session scoped" : "Allow all"}</strong><small>{mode === "interactive" ? "Confirm every shell, URL, and script action." : mode === "session-scoped" ? "Automatically allow selected capability groups." : "Automatically allow all execution actions."}</small></span></label>)}
         </fieldset>
         {approvalMode === "session-scoped" && <div className="scope-grid">{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} /> {scope === "private-script" ? "Private scripts" : scope[0]?.toUpperCase() + scope.slice(1)}</label>)}</div>}
-        {approvalMode === "allow-all" && <div className="warning-banner">Allow all can execute repository scripts and send repository content to public URLs without prompting. The repository mount remains read-only.</div>}
+        {approvalMode === "allow-all" && <div className="warning-banner">{sandboxBackend === "local" ? "Allow all runs commands and scripts on the host without prompting or isolation. They can modify the repository and access other host files." : "Allow all can execute repository scripts and send repository content to public URLs without prompting. The repository mount remains read-only."}</div>}
         <div className="dialog-footer"><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={!repositoryId || busy} onClick={() => { setBusy(true); void onCreate({ repositoryId, model, approvalMode, approvalScopes: approvalMode === "session-scoped" ? scopes : [] }).finally(() => setBusy(false)); }}>{busy ? "Creating…" : "Start conversation"}</button></div>
       </section>
     </div>

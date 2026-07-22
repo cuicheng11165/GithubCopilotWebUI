@@ -60,6 +60,7 @@ button { color: inherit; }
 .mode-pill.danger { color: var(--red); background: #fff1f0; border-color: #f4cfcd; }
 .model-pill { background: var(--green-soft); color: var(--green); border-color: #cee8da; }
 .allow-all-banner { min-height: 35px; background: #fff4e3; border-bottom: 1px solid #f2dbb9; color: #815317; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px; padding: 7px 16px; }
+.local-execution-banner { min-height: 35px; background: #fff0ed; border-bottom: 1px solid #efc3bc; color: #8e2f22; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px; padding: 7px 16px; }
 .session-scope-bar { min-height: 35px; background: #f4f7f4; border-bottom: 1px solid var(--line); color: var(--muted); display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; font-size: 11px; padding: 6px 16px; }
 .session-scope-bar label { display: inline-flex; align-items: center; gap: 4px; color: var(--text); }
 .session-scope-bar input { accent-color: var(--green); }

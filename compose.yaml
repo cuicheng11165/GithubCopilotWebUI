@@ -4,8 +4,10 @@ x-app-env: &app-env
   NODE_ENV: production
   PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
   DATABASE_MODE: local
+  COORDINATION_BACKEND: redis
   DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
   REDIS_URL: redis://redis:6379
+  SANDBOX_BACKEND: container
   COOKIE_SECRET: ${COOKIE_SECRET}
   TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
   REPOSITORIES_CONFIG: /config/repositories.yaml
@@ -55,9 +57,11 @@ services:
   sandbox-runner:
     build: { context: ., target: sandbox-runner }
     environment:
+      SANDBOX_RUNNER_HOST: 0.0.0.0
       SANDBOX_RUNNER_PORT: 4100
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN}
       REPOSITORIES_CONFIG: /config/repositories.yaml
+      SANDBOX_BACKEND: container
       CONTAINER_RUNTIME: docker
       DOCKER_HOST: unix:///var/run/docker.sock
       SANDBOX_DEFAULT_IMAGE: copilot-web-sandbox:local
@@ -85,6 +89,7 @@ services:
     build: { context: ., target: api }
     environment:
       <<: *app-env
+      API_HOST: 0.0.0.0
       API_PORT: 4000
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
@@ -107,12 +112,14 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_MODE: local
+      COORDINATION_BACKEND: redis
       DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       REPOSITORIES_CONFIG: /config/repositories.yaml
       SANDBOX_RUNNER_URL: http://sandbox-runner:4100
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN}
+      SANDBOX_BACKEND: container
       COPILOT_HOME: /var/lib/copilot-data/copilot
       WORKER_CONCURRENCY: ${LOCAL_WORKER_CONCURRENCY:-2}
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}

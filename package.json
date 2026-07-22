@@ -10,6 +10,7 @@
     "postinstall": "pnpm db:generate",
     "build": "pnpm -r build",
     "dev": "node scripts/dev.mjs",
+    "start:local": "node scripts/start-local.mjs",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest",

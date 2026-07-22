@@ -1,5 +1,6 @@
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, symlink } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
@@ -28,26 +29,38 @@ import {
 import { z } from "zod";
 
 const env = z.object({
+  COORDINATION_BACKEND: z.enum(["local", "redis"]).default("local"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
+  WORKER_CONTROL_PORT: z.coerce.number().int().positive().default(4200),
+  WORKER_CONTROL_TOKEN: z.string().min(32).optional(),
+  LOCAL_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
   TOKEN_ENCRYPTION_KEY: z.string().min(32),
   REPOSITORIES_CONFIG: z.string().default("./config/repositories.yaml"),
   COPILOT_HOME: z.string().default("./data/copilot"),
-  SANDBOX_RUNNER_URL: z.string().url().default("http://localhost:4100"),
+  SANDBOX_RUNNER_URL: z.string().url().default("http://127.0.0.1:4100"),
   SANDBOX_RUNNER_TOKEN: z.string().min(32),
+  SANDBOX_BACKEND: z.enum(["local", "container"]).default("local"),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(8),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300)
 }).parse(process.env);
 
-const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
-const subscriber = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
-const queueUrl = new URL(env.REDIS_URL);
-const queueConnection = {
-  host: queueUrl.hostname,
-  port: Number(queueUrl.port || 6379),
-  ...(queueUrl.username ? { username: decodeURIComponent(queueUrl.username) } : {}),
-  ...(queueUrl.password ? { password: decodeURIComponent(queueUrl.password) } : {}),
-  ...(queueUrl.protocol === "rediss:" ? { tls: {} } : {})
-};
+if (env.COORDINATION_BACKEND === "local" && !env.WORKER_CONTROL_TOKEN) {
+  throw new Error("WORKER_CONTROL_TOKEN with at least 32 characters is required for local coordination");
+}
+
+const usesRedis = env.COORDINATION_BACKEND === "redis";
+const redis = usesRedis ? new Redis(env.REDIS_URL, { maxRetriesPerRequest: null }) : null;
+const subscriber = usesRedis ? new Redis(env.REDIS_URL, { maxRetriesPerRequest: null }) : null;
+const queueConnection = usesRedis ? (() => {
+  const queueUrl = new URL(env.REDIS_URL);
+  return {
+    host: queueUrl.hostname,
+    port: Number(queueUrl.port || 6379),
+    ...(queueUrl.username ? { username: decodeURIComponent(queueUrl.username) } : {}),
+    ...(queueUrl.password ? { password: decodeURIComponent(queueUrl.password) } : {}),
+    ...(queueUrl.protocol === "rediss:" ? { tls: {} } : {})
+  };
+})() : null;
 const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
 await registry.load();
 registry.watch((error) => console.error("Repository config reload failed", error));
@@ -67,8 +80,10 @@ const client = new CopilotClient({
   env: copilotRuntimeEnv
 });
 await client.start();
-const activeSessions = new Map<string, CopilotSession>();
+const activeSessions = new Map<string, { session: CopilotSession; turnId: string }>();
 const stopRequested = new Set<string>();
+const localSessionLocks = new Set<string>();
+let shuttingDown = false;
 
 function decryptToken(value: string): string {
   const [version, iv, tag, encrypted] = value.split(".");
@@ -83,7 +98,7 @@ function decryptToken(value: string): string {
 async function appendEvent(sessionId: string, turnId: string | null, kind: string, data: Record<string, unknown>) {
   const event = await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
   const serialized = { cursor: Number(event.cursor), sessionId, turnId, kind, data, createdAt: event.createdAt.toISOString() };
-  await redis.publish(`${SESSION_EVENT_CHANNEL_PREFIX}${sessionId}`, JSON.stringify(serialized));
+  if (redis) await redis.publish(`${SESSION_EVENT_CHANNEL_PREFIX}${sessionId}`, JSON.stringify(serialized));
 }
 
 async function sandboxRequest<T>(pathname: string, body?: unknown): Promise<T> {
@@ -141,9 +156,9 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.WAITING_APPROVAL } }),
     db.turn.update({ where: { id: turnId }, data: { status: TurnStatus.WAITING_APPROVAL } })
   ]);
-  const decisionSubscriber = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
-  const channel = `${PERMISSION_DECISION_CHANNEL_PREFIX}${permission.id}`;
-  await decisionSubscriber.subscribe(channel);
+  const decisionChannel = `${PERMISSION_DECISION_CHANNEL_PREFIX}${permission.id}`;
+  const decisionSubscriber = usesRedis ? new Redis(env.REDIS_URL, { maxRetriesPerRequest: null }) : null;
+  if (decisionSubscriber) await decisionSubscriber.subscribe(decisionChannel);
   await appendEvent(sessionId, turnId, "permission.requested", {
     id: permission.id,
     sessionId,
@@ -155,20 +170,39 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     expiresAt: permission.expiresAt.toISOString()
   });
 
-  const approved = await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), env.APPROVAL_TIMEOUT_SECONDS * 1000);
-    decisionSubscriber.on("message", (incoming: string, decision: string) => {
-      if (incoming !== channel) return;
-      clearTimeout(timer);
-      resolve(decision === "approve-once");
+  let approved = false;
+  if (decisionSubscriber) {
+    approved = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), env.APPROVAL_TIMEOUT_SECONDS * 1000);
+      decisionSubscriber.on("message", (incoming: string, decision: string) => {
+        if (incoming !== decisionChannel) return;
+        clearTimeout(timer);
+        resolve(decision === "approve-once");
+      });
     });
-  });
-  await decisionSubscriber.quit();
+    await decisionSubscriber.quit();
+  } else {
+    while (Date.now() < permission.expiresAt.getTime()) {
+      const [latestPermission, latestTurn] = await Promise.all([
+        db.permissionRequest.findUnique({ where: { id: permission.id }, select: { status: true } }),
+        db.turn.findUnique({ where: { id: turnId }, select: { status: true } })
+      ]);
+      if (!latestPermission || latestPermission.status !== PermissionStatus.PENDING) {
+        approved = latestPermission?.status === PermissionStatus.APPROVED;
+        break;
+      }
+      if (!latestTurn || latestTurn.status === TurnStatus.STOPPED) break;
+      await new Promise((resolve) => setTimeout(resolve, env.LOCAL_POLL_INTERVAL_MS));
+    }
+  }
   const latest = await db.permissionRequest.findUnique({ where: { id: permission.id } });
+  if (latest?.status === PermissionStatus.APPROVED) approved = true;
   if (latest?.status === PermissionStatus.PENDING) {
     await db.permissionRequest.update({ where: { id: permission.id }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } });
     await appendEvent(sessionId, turnId, "permission.completed", { requestId: permission.id, decision: "expired" });
   }
+  const latestTurn = await db.turn.findUnique({ where: { id: turnId }, select: { status: true } });
+  if (!latestTurn || latestTurn.status === TurnStatus.STOPPED) return false;
   await db.$transaction([
     db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.RUNNING } }),
     db.turn.update({ where: { id: turnId }, data: { status: TurnStatus.RUNNING } })
@@ -200,6 +234,12 @@ const rawSchemas = {
 } as const;
 
 function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>[] {
+  const shellDescription = env.SANDBOX_BACKEND === "local"
+    ? "Execute a shell command directly on the CopilotDeck host as its current operating-system user. The command can modify the repository and access other host resources."
+    : "Execute a shell command in an isolated container with the repository mounted read-only.";
+  const scriptDescription = env.SANDBOX_BACKEND === "local"
+    ? "Run a script stored in the repository or one of its private skills directly on the CopilotDeck host without isolation."
+    : "Run a script stored in the repository or one of its private skills inside the isolated read-only sandbox.";
   return [
     defineTool<{ path?: string; depth?: number }>("repo_tree", {
       description: "List files and directories in the configured live repository.", parameters: rawSchemas.tree, skipPermission: true, defer: "never",
@@ -218,7 +258,7 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: () => getGitInfo(repository)
     }),
     defineTool<{ command: string; intention: string }>("execute_shell", {
-      description: "Execute a shell command in an isolated container with the repository mounted read-only.", parameters: rawSchemas.shell, defer: "never",
+      description: shellDescription, parameters: rawSchemas.shell, defer: "never",
       handler: ({ command }) => sandboxRequest("/execute", { repositoryId: repository.id, sessionId, command })
     }),
     defineTool<{ url: string; intention: string }>("fetch_url", {
@@ -226,23 +266,31 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: ({ url }) => sandboxRequest("/fetch", { url, maxBytes: 1_000_000 })
     }),
     defineTool<{ script: string; args?: string[]; interpreter?: "direct" | "shell" | "node" | "python"; intention: string }>("run_private_script", {
-      description: "Run a script stored in the repository or one of its private skills inside the isolated read-only sandbox.", parameters: rawSchemas.script, defer: "never",
+      description: scriptDescription, parameters: rawSchemas.script, defer: "never",
       handler: async ({ script, args = [], interpreter = "direct" }) => {
         const absolute = await resolveRepositoryPath(repository, script);
         const relative = path.relative(repository.canonicalPath, absolute);
         const executable = interpreter === "shell" ? "/bin/sh" : interpreter === "node" ? "node" : interpreter === "python" ? "python3" : "";
-        const command = [executable, `/repo/${relative}`, ...args].filter(Boolean).map(quote).join(" ");
+        const portableRelative = relative.split(path.sep).join("/");
+        const command = [executable, `./${portableRelative}`, ...args].filter(Boolean).map(quote).join(" ");
         return sandboxRequest("/execute", { repositoryId: repository.id, sessionId, command });
       }
     })
   ];
 }
 
-async function runTurn(job: Job<{ sessionId: string; turnId: string }>) {
+interface TurnJobLike {
+  data: { sessionId: string; turnId: string };
+}
+
+async function runTurn(job: TurnJobLike) {
   const lockKey = `session-lock:${job.data.sessionId}`;
   const lockValue = randomUUID();
-  const locked = await redis.set(lockKey, lockValue, "EX", 900, "NX");
+  const locked = redis
+    ? await redis.set(lockKey, lockValue, "EX", 900, "NX")
+    : !localSessionLocks.has(job.data.sessionId);
   if (!locked) throw new Error("Session is already processing another turn");
+  if (!redis) localSessionLocks.add(job.data.sessionId);
   let sdkSession: CopilotSession | undefined;
   try {
     const turn = await db.turn.findUniqueOrThrow({ where: { id: job.data.turnId }, include: { session: { include: { githubAccount: true } }, messages: { where: { role: MessageRole.USER }, orderBy: { createdAt: "asc" }, take: 1 } } });
@@ -271,12 +319,14 @@ async function runTurn(job: Job<{ sessionId: string; turnId: string }>) {
       enableSkills: true,
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },
-      systemMessage: { mode: "append" as const, content: "You are working with a live repository. The repository is strictly read-only. Never claim to have modified files. Use the provided repository tools for reading, and the controlled shell, URL, or private-script tools when needed. Commands run in an isolated container and may only write under temporary directories." },
+      systemMessage: { mode: "append" as const, content: env.SANDBOX_BACKEND === "local"
+        ? "You are working with a live repository. SDK write/edit tools are disabled, but approved shell commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Use repository tools for reading and clearly report any command that changes files."
+        : "You are working with a live repository. The repository is strictly read-only. Never claim to have modified files. Use the provided repository tools for reading, and the controlled shell, URL, or private-script tools when needed. Commands run in an isolated container and may only write under temporary directories." },
       onPermissionRequest: permissionHandler(turn.session.id, turn.id)
     };
     const metadata = await client.getSessionMetadata(turn.session.sdkSessionId);
     sdkSession = metadata ? await client.resumeSession(turn.session.sdkSessionId, sessionOptions) : await client.createSession({ ...sessionOptions, sessionId: turn.session.sdkSessionId });
-    activeSessions.set(turn.session.id, sdkSession);
+    activeSessions.set(turn.session.id, { session: sdkSession, turnId: turn.id });
     let assistantSaved = false;
     sdkSession.on((rawEvent) => {
       const event = rawEvent as unknown as { type: string; data: Record<string, unknown> };
@@ -307,10 +357,16 @@ async function runTurn(job: Job<{ sessionId: string; turnId: string }>) {
         await appendEvent(turn.session.id, turn.id, "assistant.message", { content: final.data.content });
       }
     }
+    const latestTurn = await db.turn.findUnique({ where: { id: turn.id }, select: { status: true } });
+    if (latestTurn?.status === TurnStatus.STOPPED) {
+      stopRequested.add(turn.session.id);
+      throw new Error("Turn was stopped");
+    }
     const titleUpdate = turn.session.title === "New chat" ? { title: prompt.replace(/\s+/g, " ").slice(0, 60) } : {};
+    const nextQueued = await db.turn.findFirst({ where: { sessionId: turn.session.id, status: TurnStatus.QUEUED }, select: { id: true } });
     await db.$transaction([
       db.turn.update({ where: { id: turn.id }, data: { status: TurnStatus.COMPLETED, completedAt: new Date() } }),
-      db.chatSession.update({ where: { id: turn.session.id }, data: { status: SessionStatus.IDLE, ...titleUpdate } })
+      db.chatSession.update({ where: { id: turn.session.id }, data: { status: nextQueued ? SessionStatus.QUEUED : SessionStatus.IDLE, ...titleUpdate } })
     ]);
     await appendEvent(turn.session.id, turn.id, "turn.completed", { title: titleUpdate.title ?? turn.session.title });
   } catch (error) {
@@ -326,15 +382,16 @@ async function runTurn(job: Job<{ sessionId: string; turnId: string }>) {
     activeSessions.delete(job.data.sessionId);
     stopRequested.delete(job.data.sessionId);
     if (sdkSession) await sdkSession.disconnect().catch(() => undefined);
-    await redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, lockKey, lockValue);
+    if (redis) await redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, lockKey, lockValue);
+    else localSessionLocks.delete(job.data.sessionId);
   }
 }
 
-const turnWorker = new Worker(COPILOT_TURN_QUEUE, runTurn, { connection: queueConnection, concurrency: env.WORKER_CONCURRENCY });
+const localDeleteLocks = new Set<string>();
 
-const controlWorker = new Worker(COPILOT_CONTROL_QUEUE, async (job: Job) => {
-  if (job.name === "list-models") {
-    const account = await db.gitHubAccount.findUniqueOrThrow({ where: { id: String(job.data.githubAccountId) } });
+async function handleControl(name: string, data: Record<string, unknown>) {
+  if (name === "list-models") {
+    const account = await db.gitHubAccount.findUniqueOrThrow({ where: { id: String(data.githubAccountId) } });
     const token = decryptToken(account.encryptedAccessToken);
     const modelClient = new CopilotClient({ mode: "empty", baseDirectory: path.join(env.COPILOT_HOME, "model-clients", account.id), gitHubToken: token, useLoggedInUser: false, env: copilotRuntimeEnv });
     try {
@@ -343,58 +400,185 @@ const controlWorker = new Worker(COPILOT_CONTROL_QUEUE, async (job: Job) => {
       return [{ id: "auto", name: "Auto", supportsReasoning: false }, ...models.map((model) => ({ id: model.id, name: model.name ?? model.id, supportsReasoning: Boolean(model.capabilities?.supports?.reasoningEffort) }))];
     } finally { await modelClient.stop(); }
   }
-  const sessionId = String(job.data.sessionId);
+  const sessionId = String(data.sessionId);
   stopRequested.add(sessionId);
   const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
-  for (const request of pending) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${request.id}`, "deny");
+  if (redis) for (const request of pending) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${request.id}`, "deny");
   if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
   const active = activeSessions.get(sessionId);
-  if (active) await active.abort().catch(() => undefined);
+  if (active) await active.session.abort().catch(() => undefined);
   await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
-  if (job.name === "delete-session") {
+  if (name === "delete-session") {
     const turnLock = `session-lock:${sessionId}`;
     const deadline = Date.now() + 30_000;
-    while (await redis.exists(turnLock)) {
+    while (activeSessions.has(sessionId) || localSessionLocks.has(sessionId) || (redis ? Boolean(await redis.exists(turnLock)) : false)) {
       if (Date.now() >= deadline) throw new Error("Timed out waiting for the active Session turn to stop");
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     const deleteLock = `session-delete-lock:${sessionId}`;
     const deleteLockValue = randomUUID();
-    if (!(await redis.set(deleteLock, deleteLockValue, "EX", 60, "NX"))) throw new Error("Session deletion is already in progress");
+    const deleteLocked = redis ? await redis.set(deleteLock, deleteLockValue, "EX", 60, "NX") : !localDeleteLocks.has(sessionId);
+    if (!deleteLocked) throw new Error("Session deletion is already in progress");
+    if (!redis) localDeleteLocks.add(sessionId);
     try {
-      await client.deleteSession(String(job.data.sdkSessionId)).catch((error) => {
+      await client.deleteSession(String(data.sdkSessionId)).catch((error) => {
         if (!(error instanceof Error && error.message.toLowerCase().includes("not found"))) throw error;
       });
       await rm(path.join(env.COPILOT_HOME, "skill-views", sessionId), { recursive: true, force: true });
     } finally {
-      await redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, deleteLock, deleteLockValue);
+      if (redis) await redis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, deleteLock, deleteLockValue);
+      else localDeleteLocks.delete(sessionId);
     }
   }
+  if (name === "delete-session" || (name === "stop-session" && !active)) stopRequested.delete(sessionId);
   return { ok: true };
-}, { connection: queueConnection, concurrency: 4 });
+}
 
-await subscriber.psubscribe(`${STOP_CHANNEL_PREFIX}*`);
-subscriber.on("pmessage", (_pattern: string, channel: string) => {
-  const sessionId = channel.slice(STOP_CHANNEL_PREFIX.length);
-  stopRequested.add(sessionId);
-  const session = activeSessions.get(sessionId);
-  if (session) void session.abort();
-  void sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+const turnWorker = queueConnection ? new Worker(COPILOT_TURN_QUEUE, runTurn, { connection: queueConnection, concurrency: env.WORKER_CONCURRENCY }) : null;
+const controlWorker = queueConnection ? new Worker(COPILOT_CONTROL_QUEUE, (job: Job) => handleControl(job.name, job.data as Record<string, unknown>), { connection: queueConnection, concurrency: 4 }) : null;
+
+if (subscriber) {
+  await subscriber.psubscribe(`${STOP_CHANNEL_PREFIX}*`);
+  subscriber.on("pmessage", (_pattern: string, channel: string) => {
+    const sessionId = channel.slice(STOP_CHANNEL_PREFIX.length);
+    stopRequested.add(sessionId);
+    const active = activeSessions.get(sessionId);
+    if (active) void active.session.abort();
+    void sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+  });
+}
+
+const localExecutions = new Set<Promise<void>>();
+let localSchedulerTimer: NodeJS.Timeout | undefined;
+let localCancellationTimer: NodeJS.Timeout | undefined;
+let localSchedulerBusy = false;
+let localCancellationBusy = false;
+
+async function recoverLocalWork() {
+  const interrupted = await db.turn.findMany({
+    where: { status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+    select: { id: true, sessionId: true }
+  });
+  if (interrupted.length === 0) return;
+  const turnIds = interrupted.map((turn) => turn.id);
+  const sessionIds = [...new Set(interrupted.map((turn) => turn.sessionId))];
+  const pending = await db.permissionRequest.findMany({ where: { turnId: { in: turnIds }, status: PermissionStatus.PENDING } });
+  await db.$transaction([
+    db.permissionRequest.updateMany({ where: { turnId: { in: turnIds }, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } }),
+    db.turn.updateMany({ where: { id: { in: turnIds } }, data: { status: TurnStatus.QUEUED, startedAt: null, completedAt: null, error: "Recovered after local Worker restart" } }),
+    db.chatSession.updateMany({ where: { id: { in: sessionIds } }, data: { status: SessionStatus.QUEUED } })
+  ]);
+  for (const permission of pending) await appendEvent(permission.sessionId, permission.turnId, "permission.completed", { requestId: permission.id, decision: "expired", reason: "worker-restart" });
+  for (const turn of interrupted) await appendEvent(turn.sessionId, turn.id, "turn.queued", { turnId: turn.id, reason: "worker-restart" });
+}
+
+async function pollLocalTurns() {
+  if (shuttingDown || localSchedulerBusy) return;
+  localSchedulerBusy = true;
+  try {
+    const capacity = env.WORKER_CONCURRENCY - localExecutions.size;
+    if (capacity <= 0) return;
+    const candidates = await db.turn.findMany({
+      where: { status: TurnStatus.QUEUED },
+      orderBy: { createdAt: "asc" },
+      take: Math.max(capacity * 4, capacity),
+      select: { id: true, sessionId: true }
+    });
+    const reservedSessions = new Set([...localSessionLocks, ...activeSessions.keys()]);
+    for (const turn of candidates) {
+      if (localExecutions.size >= env.WORKER_CONCURRENCY) break;
+      if (reservedSessions.has(turn.sessionId)) continue;
+      const claimed = await db.turn.updateMany({
+        where: { id: turn.id, status: TurnStatus.QUEUED },
+        data: { status: TurnStatus.RUNNING, startedAt: new Date(), error: null }
+      });
+      if (claimed.count === 0) continue;
+      reservedSessions.add(turn.sessionId);
+      const execution = runTurn({ data: { sessionId: turn.sessionId, turnId: turn.id } })
+        .catch((error) => console.error("Local turn failed", error))
+        .finally(() => localExecutions.delete(execution));
+      localExecutions.add(execution);
+    }
+  } finally {
+    localSchedulerBusy = false;
+  }
+}
+
+async function pollLocalCancellations() {
+  if (shuttingDown || localCancellationBusy || activeSessions.size === 0) return;
+  localCancellationBusy = true;
+  try {
+    for (const [sessionId, active] of activeSessions) {
+      const turn = await db.turn.findUnique({ where: { id: active.turnId }, select: { status: true } });
+      if (turn?.status !== TurnStatus.STOPPED) continue;
+      stopRequested.add(sessionId);
+      await active.session.abort().catch(() => undefined);
+      await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+    }
+  } finally {
+    localCancellationBusy = false;
+  }
+}
+
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+  let raw = "";
+  for await (const chunk of request) {
+    raw += chunk.toString();
+    if (raw.length > 256 * 1024) throw new Error("Request body is too large");
+  }
+  return raw ? JSON.parse(raw) as Record<string, unknown> : {};
+}
+
+function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
+  response.writeHead(statusCode, { "Content-Type": "application/json" });
+  response.end(JSON.stringify(body));
+}
+
+const controlServer = usesRedis ? null : createServer(async (request, response) => {
+  try {
+    if (request.url === "/health/ready" && request.method === "GET") return sendJson(response, 200, { status: "ready", coordinationBackend: "local" });
+    if (request.headers.authorization !== `Bearer ${env.WORKER_CONTROL_TOKEN}`) return sendJson(response, 401, { error: "Unauthorized" });
+    if (request.method !== "POST") return sendJson(response, 404, { error: "Not found" });
+    const body = await readJson(request);
+    if (request.url === "/models") return sendJson(response, 200, await handleControl("list-models", body));
+    const match = request.url?.match(/^\/sessions\/([0-9a-f-]+)\/(stop|delete)$/i);
+    if (!match) return sendJson(response, 404, { error: "Not found" });
+    const name = match[2] === "delete" ? "delete-session" : "stop-session";
+    return sendJson(response, 200, await handleControl(name, { ...body, sessionId: match[1] }));
+  } catch (error) {
+    return sendJson(response, 500, { error: error instanceof Error ? error.message : "Worker control failed" });
+  }
 });
 
+if (!usesRedis) {
+  await new Promise<void>((resolve, reject) => {
+    controlServer?.once("error", reject);
+    controlServer?.listen(env.WORKER_CONTROL_PORT, "127.0.0.1", resolve);
+  });
+  console.log(`Local Worker control listening on http://127.0.0.1:${env.WORKER_CONTROL_PORT}`);
+  await recoverLocalWork();
+  await pollLocalTurns();
+  localSchedulerTimer = setInterval(() => void pollLocalTurns().catch((error) => console.error("Local scheduler failed", error)), env.LOCAL_POLL_INTERVAL_MS);
+  localCancellationTimer = setInterval(() => void pollLocalCancellations().catch((error) => console.error("Local cancellation poll failed", error)), env.LOCAL_POLL_INTERVAL_MS);
+}
+
 async function shutdown() {
-  for (const [sessionId, session] of activeSessions) {
+  shuttingDown = true;
+  if (localSchedulerTimer) clearInterval(localSchedulerTimer);
+  if (localCancellationTimer) clearInterval(localCancellationTimer);
+  for (const [sessionId, active] of activeSessions) {
     stopRequested.add(sessionId);
     const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
-    for (const request of pending) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${request.id}`, "deny");
+    if (redis) for (const request of pending) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${request.id}`, "deny");
     if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
-    await session.abort().catch(() => undefined);
+    await active.session.abort().catch(() => undefined);
     await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
   }
-  await Promise.all([turnWorker.close(), controlWorker.close()]);
+  await Promise.allSettled([...localExecutions]);
+  await Promise.all([turnWorker?.close(), controlWorker?.close(), controlServer ? new Promise<void>((resolve) => controlServer.close(() => resolve())) : undefined]);
   await client.stop();
   registry.close();
-  await Promise.all([subscriber.quit(), redis.quit(), db.$disconnect()]);
+  await Promise.all([subscriber?.quit(), redis?.quit(), db.$disconnect()]);
 }
 process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)));
 process.once("SIGINT", () => void shutdown().then(() => process.exit(0)));
