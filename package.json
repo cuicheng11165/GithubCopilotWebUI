@@ -1,0 +1,28 @@
+{
+  "name": "copilot-web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "pnpm db:generate",
+    "build": "pnpm -r build",
+    "dev": "node scripts/dev.mjs",
+    "start:local": "node scripts/start-local.mjs",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "pnpm --filter @app/db generate",
+    "db:migrate": "pnpm --filter @app/db migrate",
+    "db:migrate:dev": "pnpm --filter @app/db exec node scripts/sqlite-prisma.mjs migrate dev",
+    "db:validate": "pnpm --filter @app/db validate"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}

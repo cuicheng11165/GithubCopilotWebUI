@@ -1,0 +1,5 @@
+repositories:
+  - id: example
+    displayName: Example Repository
+    path: /absolute/path/to/repository
+    enabled: true

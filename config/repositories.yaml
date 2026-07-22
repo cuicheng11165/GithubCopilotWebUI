@@ -1,0 +1,5 @@
+repositories:
+  - id: integration-test
+    displayName: Integration Test
+    path: C:/Drive/Trunk/integration-test
+    enabled: true

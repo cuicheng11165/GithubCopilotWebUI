@@ -1,0 +1,21 @@
+{
+  "name": "@app/sandbox-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsup src/server.ts --format esm --sourcemap --clean",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@app/repository-tools": "workspace:*",
+    "fastify": "5.10.0",
+    "ipaddr.js": "2.2.0",
+    "zod": "3.25.64"
+  },
+  "devDependencies": {
+    "tsup": "8.5.0"
+  }
+}
