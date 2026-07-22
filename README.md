@@ -76,6 +76,8 @@ Set the GitHub App values, generate independent service secrets, and configure e
 
 ```dotenv
 DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
+LOG_LEVEL=info
+LOG_DIR=./data/logs
 LOCAL_SANDBOX_TMP_ROOT=./data/local-sandbox
 WORKER_CONTROL_URL=http://127.0.0.1:4200
 WORKER_CONTROL_HOST=127.0.0.1
@@ -85,6 +87,18 @@ WORKER_POLL_INTERVAL_MS=200
 EVENT_POLL_INTERVAL_MS=200
 WORKER_CONCURRENCY=2
 ```
+
+API and Worker session logs are written as JSON text lines to
+`LOG_DIR/users/<userId>/sessions/<sessionId>/api.log` and `worker.log` while
+continuing to appear in the console. Startup and other logs without a session
+context are written under the user's `system` folder, or under `LOG_DIR/system`
+when no user is known. `LOG_LEVEL` controls the minimum level. Relative
+`LOG_DIR` values are resolved from the repository root.
+
+Each session's API log includes complete user inputs as `user.message` events,
+and its Worker log includes complete Agent responses as `agent.message` events.
+Streaming response fragments are not logged separately. Log timestamps use the
+ISO 8601 UTC format (for example, `2026-07-23T05:30:12.345Z`).
 
 Development:
 

@@ -29,6 +29,9 @@ importers:
       '@app/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@app/logging':
+        specifier: workspace:*
+        version: link:../../packages/logging
       '@app/repository-tools':
         specifier: workspace:*
         version: link:../../packages/repository-tools
@@ -110,6 +113,9 @@ importers:
       '@app/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@app/logging':
+        specifier: workspace:*
+        version: link:../../packages/logging
       '@app/repository-tools':
         specifier: workspace:*
         version: link:../../packages/repository-tools
@@ -139,6 +145,12 @@ importers:
       prisma:
         specifier: 6.19.0
         version: 6.19.0(typescript@5.8.3)
+
+  packages/logging:
+    dependencies:
+      pino:
+        specifier: 10.3.1
+        version: 10.3.1
 
   packages/repository-tools:
     dependencies:

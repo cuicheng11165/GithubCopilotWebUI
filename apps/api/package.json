@@ -12,6 +12,7 @@
   "dependencies": {
     "@app/contracts": "workspace:*",
     "@app/db": "workspace:*",
+    "@app/logging": "workspace:*",
     "@app/repository-tools": "workspace:*",
     "@fastify/cookie": "11.0.2",
     "@fastify/cors": "11.0.1",

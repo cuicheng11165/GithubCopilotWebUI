@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyBaseLogger } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import { randomUUID } from "node:crypto";
@@ -11,13 +11,15 @@ import {
   type ApprovalScope
 } from "@app/contracts";
 import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
+import { createServiceLogger } from "@app/logging";
 import { RepositoryRegistry, getGitInfo, scanSkills } from "@app/repository-tools";
-import { authenticate, ownedSession, SESSION_COOKIE } from "./auth.js";
+import { authenticate, bindSessionLog, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
 import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
 import { registerOAuthRoutes } from "./oauth.js";
 
-const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info", redact: ["req.headers.authorization", "req.headers.cookie"] } });
+const app = Fastify({ loggerInstance: createServiceLogger({ service: "api" }) as FastifyBaseLogger });
+app.log.info({ timestampFormat: "ISO 8601 UTC" }, "API session-routed text logging ready");
 const registry = new RepositoryRegistry(config.REPOSITORIES_CONFIG);
 const deletingSessions = new Set<string>();
 const ephemeral: EphemeralStore = new MemoryEphemeralStore();
@@ -210,6 +212,7 @@ app.post("/api/sessions", async (request, reply) => {
     dirty: git.dirty,
     skillManifest: skills.map(({ name, description, source, warning, contentHash }) => ({ name, description, source, warning, contentHash }))
   } });
+  bindSessionLog(request, auth.user.id, session.id);
   await db.auditLog.create({ data: { userId: auth.user.id, action: "session.created", targetId: session.id, metadata: { repositoryId: repository.id } } });
   return reply.code(201).send(serializeSession(session));
 });
@@ -222,6 +225,7 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) 
     permissionRequests: { where: { status: PermissionStatus.PENDING }, orderBy: { createdAt: "asc" } }
   } });
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   const { messages, permissionRequests, ...sessionData } = session;
   return {
     session: serializeSession(sessionData),
@@ -245,6 +249,7 @@ app.patch<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   const parsed = updateSessionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid update", details: parsed.error.flatten() });
   const nextMode = parsed.data.approvalMode ?? fromDbApprovalMode(session.approvalMode);
@@ -265,6 +270,7 @@ app.delete<{ Params: { id: string } }>("/api/sessions/:id", async (request, repl
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   if (deletingSessions.has(session.id)) return reply.code(409).send({ error: "Session deletion is already in progress" });
   deletingSessions.add(session.id);
   try {
@@ -294,9 +300,11 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/messages", async (reques
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   if (deletingSessions.has(session.id)) return reply.code(409).send({ error: "Session is being deleted" });
   const parsed = sendMessageSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid message", details: parsed.error.flatten() });
+  request.log.info({ event: "user.message", content: parsed.data.content }, "User message received");
   const idempotencyKey = request.headers["idempotency-key"];
   if (typeof idempotencyKey !== "string" || idempotencyKey.length > 200) return reply.code(400).send({ error: "Idempotency-Key header is required" });
   const existing = await db.turn.findUnique({ where: { sessionId_idempotencyKey: { sessionId: session.id, idempotencyKey } } });
@@ -316,6 +324,7 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/stop", async (request, r
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   await db.$transaction([
     db.turn.updateMany({ where: { sessionId: session.id, status: { in: [TurnStatus.QUEUED, TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } }, data: { status: TurnStatus.STOPPED, completedAt: new Date() } }),
     db.chatSession.update({ where: { id: session.id }, data: { status: SessionStatus.IDLE } })
@@ -330,6 +339,7 @@ app.post<{ Params: { id: string; requestId: string } }>("/api/sessions/:id/permi
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   const parsed = permissionDecisionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid decision" });
   const permission = await db.permissionRequest.findFirst({ where: { id: request.params.requestId, sessionId: session.id, status: PermissionStatus.PENDING } });
@@ -348,6 +358,7 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
   if (!(auth && "user" in auth)) return;
   const session = await ownedSession(auth.user.id, request.params.id);
   if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
   const headerCursor = request.headers["last-event-id"];
   const cursorText = request.query.after ?? (typeof headerCursor === "string" ? headerCursor : "0");
   if (!/^\d+$/.test(cursorText)) return reply.code(400).send({ error: "Invalid event cursor" });
