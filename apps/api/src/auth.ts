@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { db } from "@app/db";
+import { db, type ChatSession } from "@app/db";
 import { decryptSecret, encryptSecret, hashToken } from "./crypto.js";
 import { oauthProviders } from "./config.js";
 
@@ -77,6 +77,6 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
   };
 }
 
-export async function ownedSession(userId: string, sessionId: string) {
+export async function ownedSession(userId: string, sessionId: string): Promise<ChatSession | null> {
   return db.chatSession.findFirst({ where: { id: sessionId, userId } });
 }

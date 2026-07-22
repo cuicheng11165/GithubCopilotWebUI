@@ -1,40 +1,37 @@
-import { PrismaClient as PostgreSqlPrismaClient } from "@prisma/client";
-import { PrismaClient as SqlitePrismaClient } from "../generated/sqlite/index.js";
+import { PrismaClient } from "../generated/sqlite/index.js";
 
-export type DatabaseMode = "local" | "multi-user";
+export const ApprovalMode = { INTERACTIVE: "INTERACTIVE", SESSION_SCOPED: "SESSION_SCOPED", ALLOW_ALL: "ALLOW_ALL" } as const;
+export const SessionStatus = { IDLE: "IDLE", QUEUED: "QUEUED", RUNNING: "RUNNING", WAITING_APPROVAL: "WAITING_APPROVAL", ERROR: "ERROR" } as const;
+export const TurnStatus = { QUEUED: "QUEUED", RUNNING: "RUNNING", WAITING_APPROVAL: "WAITING_APPROVAL", COMPLETED: "COMPLETED", STOPPED: "STOPPED", FAILED: "FAILED" } as const;
+export const MessageRole = { USER: "USER", ASSISTANT: "ASSISTANT", SYSTEM: "SYSTEM", TOOL: "TOOL" } as const;
+export const PermissionStatus = { PENDING: "PENDING", APPROVED: "APPROVED", DENIED: "DENIED", EXPIRED: "EXPIRED" } as const;
 
-export function resolveDatabaseMode(environment: NodeJS.ProcessEnv = process.env): DatabaseMode {
-  if (environment.DATABASE_MODE === "local" || environment.DATABASE_MODE === "multi-user") return environment.DATABASE_MODE;
-  if (environment.DATABASE_MODE) throw new Error("DATABASE_MODE must be either local or multi-user");
-  return environment.DATABASE_URL?.startsWith("file:") ? "local" : "multi-user";
+export type ApprovalMode = typeof ApprovalMode[keyof typeof ApprovalMode];
+export type SessionStatus = typeof SessionStatus[keyof typeof SessionStatus];
+export type TurnStatus = typeof TurnStatus[keyof typeof TurnStatus];
+export type MessageRole = typeof MessageRole[keyof typeof MessageRole];
+export type PermissionStatus = typeof PermissionStatus[keyof typeof PermissionStatus];
+
+export function validateDatabaseUrl(url: string): void {
+  if (!url.startsWith("file:")) throw new Error("CopilotDeck requires a SQLite DATABASE_URL beginning with file:");
 }
 
-export function validateDatabaseUrl(mode: DatabaseMode, url: string): void {
-  const sqlite = url.startsWith("file:");
-  if (mode === "local" && !sqlite) throw new Error("DATABASE_MODE=local requires a SQLite DATABASE_URL beginning with file:");
-  if (mode === "multi-user" && sqlite) throw new Error("DATABASE_MODE=multi-user requires a PostgreSQL DATABASE_URL");
-}
-
-export const databaseMode = resolveDatabaseMode();
-if (process.env.DATABASE_URL) validateDatabaseUrl(databaseMode, process.env.DATABASE_URL);
-const globalForPrisma = globalThis as unknown as { prisma?: PostgreSqlPrismaClient };
+if (process.env.DATABASE_URL) validateDatabaseUrl(process.env.DATABASE_URL);
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 const log = process.env.NODE_ENV === "development" ? ["warn", "error"] as const : ["error"] as const;
-const createClient = () => databaseMode === "local"
-  ? new SqlitePrismaClient({ log: [...log] })
-  : new PostgreSqlPrismaClient({ log: [...log] });
+const createClient = () => new PrismaClient({ log: [...log] });
 
-export const db = (globalForPrisma.prisma ?? createClient()) as unknown as PostgreSqlPrismaClient;
+export const db = globalForPrisma.prisma ?? createClient();
 
-if (databaseMode === "local") {
-  await db.$queryRawUnsafe("PRAGMA busy_timeout = 10000");
-  await db.$queryRawUnsafe("PRAGMA foreign_keys = ON");
-  await db.$queryRawUnsafe("PRAGMA journal_mode = WAL");
-}
+await db.$queryRawUnsafe("PRAGMA busy_timeout = 10000");
+await db.$queryRawUnsafe("PRAGMA foreign_keys = ON");
+await db.$queryRawUnsafe("PRAGMA journal_mode = WAL");
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db;
 
-export function toDatabaseCursor(value: bigint): bigint {
-  return (databaseMode === "local" ? Number(value) : value) as unknown as bigint;
+export function toDatabaseCursor(value: bigint): number {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Event cursor is outside SQLite's safe integer range");
+  return Number(value);
 }
 
-export * from "@prisma/client";
+export * from "../generated/sqlite/index.js";

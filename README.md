@@ -12,37 +12,29 @@ A locally deployed, multi-user web interface for GitHub Copilot Agent. It provid
 - Three execution policies: Interactive, Session scoped, and Allow all.
 - Selectable local-process or container execution for shell commands and private scripts.
 - Controlled public URL fetching and an egress proxy for sandboxed commands.
-- SQLite-native local coordination or BullMQ/Redis multi-user coordination, resumable SDK state, idempotent turns, and replayable SSE events.
+- SQLite-native task coordination, resumable SDK state, idempotent turns, and replayable SSE events.
 
 ## Architecture
 
 ```text
-Browser -> Next.js -> Fastify API -> SQLite local queue/event polling
-                                  -> or PostgreSQL + Redis/BullMQ
+Browser -> Next.js -> Fastify API -> SQLite queue/event polling
                                   -> Worker -> Copilot SDK runtime
-                                                  -> Sandbox Runner -> local host process
-                                                                    -> or rootless container + egress proxy
+                                             -> Sandbox Runner -> local host process
+                                                               -> or rootless container + egress proxy
 ```
 
 The Worker starts the bundled Copilot runtime in `mode: "empty"`. Only explicitly registered tools are visible. SDK write tools are always denied. Container mode also mounts the repository read-only; local mode deliberately does not provide an operating-system isolation boundary.
 
-## Storage modes
+## Storage and coordination
 
-CopilotDeck supports two explicit deployment modes:
+CopilotDeck uses one SQLite database in WAL mode for users, encrypted GitHub tokens, Sessions, messages, queued turns, approvals, events, and audit logs. The Worker atomically claims queued rows and polls approval/cancellation state. Copilot SDK state is stored under `./data/copilot/`. See [docs/storage.md](./docs/storage.md) for backup details.
 
-| Mode | Database | Intended use | Data location |
-| --- | --- | --- | --- |
-| `local` (default) | SQLite in WAL mode, no Redis | One machine, a personal deployment, or a small trusted team | `./data/copilot.db` and `./data/copilot/` |
-| `multi-user` | PostgreSQL + Redis/BullMQ | Higher concurrency, multiple application replicas, and production operations | PostgreSQL plus the `copilot-state` volume |
-
-Local mode stores queued turns and events in SQLite. The Worker claims queued rows, polls approval/cancellation state, and exposes a token-protected control endpoint on `127.0.0.1`. Multi-user mode keeps Redis for BullMQ, distributed locks, cancellation, and Pub/Sub. Switching modes does not automatically copy existing data; see [docs/storage.md](./docs/storage.md).
+This architecture is intended for one CopilotDeck installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal application replicas and network-mounted database files are not.
 
 ## Prerequisites
 
 - Node.js 22 or newer and pnpm 11.
-- Redis 7-compatible server is only required for `COORDINATION_BACKEND=redis` or the Compose/multi-user deployments.
 - Docker with Compose v2 is optional and only needed for Compose or isolated container execution.
-- PostgreSQL is only required when using `multi-user` mode; local mode stores application state in a SQLite file.
 - A GitHub App on GitHub.com and, optionally, a second GitHub App on the configured GHE Cloud host.
 - Copilot entitlement and Copilot CLI enabled for every user.
 - One or more local repositories that do not contain production secrets.
@@ -93,7 +85,7 @@ Repository configuration reloads automatically. Invalid updates are rejected whi
 
 ## Run without Docker
 
-This is the simplest single-machine deployment. Application data, queued turns, approvals, cancellation state, and replayable events use SQLite. No Redis, PostgreSQL, Docker, or Podman service is required. Shell commands/private scripts run directly as the user that started CopilotDeck.
+This is the simplest single-machine deployment. Application data, queued turns, approvals, cancellation state, and replayable events use SQLite. No external database, queue service, Docker, or Podman is required. Shell commands/private scripts run directly as the user that started CopilotDeck.
 
 Create the configuration:
 
@@ -105,15 +97,15 @@ cp config/repositories.example.yaml config/repositories.yaml
 Set the repository to an absolute local path, configure the GitHub App values and secrets, and keep these native settings. Native installations also need `git` and `rg` (ripgrep) on `PATH`:
 
 ```dotenv
-DATABASE_MODE=local
 DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
-COORDINATION_BACKEND=local
 SANDBOX_BACKEND=local
 LOCAL_SANDBOX_TMP_ROOT=./data/local-sandbox
-LOCAL_WORKER_URL=http://127.0.0.1:4200
+WORKER_CONTROL_URL=http://127.0.0.1:4200
+WORKER_CONTROL_HOST=127.0.0.1
 WORKER_CONTROL_PORT=4200
 WORKER_CONTROL_TOKEN=replace-with-a-different-long-random-service-token
-LOCAL_POLL_INTERVAL_MS=200
+WORKER_POLL_INTERVAL_MS=200
+EVENT_POLL_INTERVAL_MS=200
 WORKER_CONCURRENCY=2
 ```
 
@@ -121,7 +113,7 @@ Install, migrate, and run in development mode:
 
 ```bash
 corepack pnpm install
-pnpm db:migrate:local
+pnpm db:migrate
 pnpm dev
 ```
 
@@ -132,7 +124,7 @@ pnpm build
 pnpm start:local
 ```
 
-Open `http://localhost:3000`. The local starter launches Web, API, Worker, and sandbox-runner together and stops the group if one component exits. API-to-Worker control is bound to loopback and authenticated with `WORKER_CONTROL_TOKEN`. SSE and approvals normally observe SQLite changes within `LOCAL_POLL_INTERVAL_MS`.
+Open `http://localhost:3000`. The local starter launches Web, API, Worker, and sandbox-runner together and stops the group if one component exits. API-to-Worker control is bound to loopback and authenticated with `WORKER_CONTROL_TOKEN`. SSE and Worker state polling use their separately configurable intervals.
 
 > **No isolation in local execution mode:** approved commands and private scripts can modify the repository, read any host file available to the current user, start processes, and access the host network. Interactive and Session scoped approvals control when a process starts; they do not restrict the process after launch. Do not expose this mode to untrusted users.
 
@@ -146,7 +138,7 @@ For complete native, Docker Desktop, service startup, backup, upgrade, and troub
 Copy-Item .env.example .env
 Copy-Item config/repositories.example.yaml config/repositories.yaml
 corepack pnpm install
-corepack pnpm db:migrate:local
+corepack pnpm db:migrate
 corepack pnpm build
 corepack pnpm start:local
 ```
@@ -169,7 +161,7 @@ node -e "console.log(require('node:crypto').randomBytes(48).toString('base64'))"
 
 In Windows local mode, agent shell commands run through `cmd.exe`. Private scripts with `interpreter: shell` run through Windows PowerShell; Node and Python private scripts are launched directly without shell quoting. Stopping or timing out a command terminates its Windows process tree.
 
-## Run with Docker Compose and SQLite
+## Run with Docker Compose
 
 ```bash
 cp .env.example .env
@@ -182,7 +174,7 @@ Generate secrets:
 openssl rand -base64 48  # COOKIE_SECRET
 openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
 openssl rand -base64 48  # SANDBOX_RUNNER_TOKEN
-openssl rand -base64 48  # WORKER_CONTROL_TOKEN (native local mode)
+openssl rand -base64 48  # WORKER_CONTROL_TOKEN
 ```
 
 Set `REPO_ROOT`, `REPOSITORIES_CONFIG_FILE`, GitHub App credentials, and organization allowlists in `.env`, then run:
@@ -216,33 +208,21 @@ data/
 └── copilot/          # Copilot SDK session state
 ```
 
-The local Compose file limits Worker concurrency to two by default. Increase it only after testing the workload; SQLite still has a single writer even in WAL mode.
+The Compose file limits Worker concurrency to two by default. Increase it only after testing the workload; SQLite still has a single writer even in WAL mode.
 
 For a rootless Docker daemon, set `CONTAINER_RUNTIME_SOCKET` to its socket, for example `/run/user/1000/docker.sock`. The Sandbox Runner is the only service that receives this socket.
-
-## Run in multi-user mode with PostgreSQL
-
-Set a strong `POSTGRES_PASSWORD` in `.env`, then use the PostgreSQL Compose file:
-
-```bash
-docker compose -f compose.multi-user.yaml up --build
-```
-
-This mode preserves the PostgreSQL + Redis/BullMQ architecture and defaults to eight concurrent Worker jobs. It is the supported choice for high write concurrency or horizontal application scaling.
 
 ## Native development
 
 ```bash
 corepack pnpm install
-pnpm db:migrate:local
+pnpm db:migrate
 pnpm dev
 ```
 
-`pnpm install` generates both Prisma clients. The default `.env.example` selects SQLite and local coordination; its relative database URL is resolved from `packages/db/prisma-sqlite`. The default `SANDBOX_BACKEND=local` does not require Redis or a container runtime.
+`pnpm install` generates the SQLite Prisma Client. The relative database URL in `.env.example` is resolved from `packages/db/prisma-sqlite`. The default `SANDBOX_BACKEND=local` does not require a container runtime.
 
 The root `pnpm dev` command loads `.env` and normalizes repository and Copilot state paths before starting the workspace applications.
-
-For native PostgreSQL development, set `DATABASE_MODE=multi-user`, provide a PostgreSQL `DATABASE_URL`, and run `pnpm db:migrate:multi-user`.
 
 ## Verification
 

@@ -6,7 +6,7 @@
 
 - GitHub tokens are encrypted at rest with AES-256-GCM and are only decrypted by the API or Worker.
 - GitHub tokens, database credentials, application secrets, and the container-runtime socket are never injected into Agent sandboxes.
-- Session identifiers are not authorization. Every API operation checks the authenticated owner in the active SQLite or PostgreSQL database.
+- Session identifiers are not authorization. Every API operation checks the authenticated owner in SQLite.
 - The Copilot runtime runs in `mode: "empty"` and receives a per-session GitHub token.
 - In container mode, only the Sandbox Runner can ask the rootless container daemon to execute a workload.
 
@@ -41,7 +41,6 @@ Applications that ignore `HTTP_PROXY`, create raw sockets, or implement unusual 
 - Rotate `COOKIE_SECRET`, `TOKEN_ENCRYPTION_KEY`, `SANDBOX_RUNNER_TOKEN`, and `WORKER_CONTROL_TOKEN` through an established secret-management process.
 - Keep the local Worker control endpoint bound to loopback. Do not proxy or expose port 4200.
 - In local mode, protect and back up `data/copilot.db` together with `data/copilot/`; stop the API and Worker or use a SQLite-aware online backup so the WAL is not omitted.
-- In multi-user mode, protect and back up PostgreSQL and the Copilot state volume together.
 - Review Squid logs and `AuditLog` records; neither should contain OAuth tokens.
 - Keep `ALLOW_ALL` exceptional and communicate that it permits data exfiltration to public URLs.
 - Revoke the GitHub App authorization and remove application web sessions when a user leaves the allowed organization.

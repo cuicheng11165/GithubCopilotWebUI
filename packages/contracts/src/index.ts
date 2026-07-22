@@ -145,9 +145,3 @@ export interface ModelSummary {
   name: string;
   supportsReasoning: boolean;
 }
-
-export const COPILOT_TURN_QUEUE = "copilot-turns";
-export const COPILOT_CONTROL_QUEUE = "copilot-control";
-export const SESSION_EVENT_CHANNEL_PREFIX = "session-events:";
-export const PERMISSION_DECISION_CHANNEL_PREFIX = "permission-decisions:";
-export const STOP_CHANNEL_PREFIX = "session-stop:";

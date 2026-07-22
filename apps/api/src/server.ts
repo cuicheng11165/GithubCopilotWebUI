@@ -1,47 +1,26 @@
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
-import { Redis } from "ioredis";
-import { Queue, QueueEvents } from "bullmq";
 import { randomUUID } from "node:crypto";
 import {
-  COPILOT_CONTROL_QUEUE,
-  COPILOT_TURN_QUEUE,
-  PERMISSION_DECISION_CHANNEL_PREFIX,
-  SESSION_EVENT_CHANNEL_PREFIX,
-  STOP_CHANNEL_PREFIX,
   createSessionSchema,
   permissionDecisionSchema,
   sendMessageSchema,
   updateSessionSchema,
-  type ApprovalMode
+  type ApprovalMode,
+  type ApprovalScope
 } from "@app/contracts";
-import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, databaseMode, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
+import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
 import { RepositoryRegistry, getGitInfo, scanSkills } from "@app/repository-tools";
 import { authenticate, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
-import { MemoryEphemeralStore, RedisEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
+import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
 import { registerOAuthRoutes } from "./oauth.js";
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info", redact: ["req.headers.authorization", "req.headers.cookie"] } });
-const usesRedis = config.COORDINATION_BACKEND === "redis";
-const redis = usesRedis ? new Redis(config.REDIS_URL, { maxRetriesPerRequest: null }) : null;
-const queueConnection = usesRedis ? (() => {
-  const queueUrl = new URL(config.REDIS_URL);
-  return {
-    host: queueUrl.hostname,
-    port: Number(queueUrl.port || 6379),
-    ...(queueUrl.username ? { username: decodeURIComponent(queueUrl.username) } : {}),
-    ...(queueUrl.password ? { password: decodeURIComponent(queueUrl.password) } : {}),
-    ...(queueUrl.protocol === "rediss:" ? { tls: {} } : {})
-  };
-})() : null;
-const turns = queueConnection ? new Queue(COPILOT_TURN_QUEUE, { connection: queueConnection }) : null;
-const controls = queueConnection ? new Queue(COPILOT_CONTROL_QUEUE, { connection: queueConnection }) : null;
-const controlEvents = queueConnection ? new QueueEvents(COPILOT_CONTROL_QUEUE, { connection: queueConnection }) : null;
 const registry = new RepositoryRegistry(config.REPOSITORIES_CONFIG);
 const deletingSessions = new Set<string>();
-const ephemeral: EphemeralStore = redis ? new RedisEphemeralStore(redis) : new MemoryEphemeralStore();
+const ephemeral: EphemeralStore = new MemoryEphemeralStore();
 
 app.decorate("ephemeral", ephemeral);
 await app.register(cookie, { secret: config.COOKIE_SECRET });
@@ -50,7 +29,7 @@ await registry.load();
 registry.watch((error) => app.log.error(error, "Repository config reload failed; keeping previous config"));
 registerOAuthRoutes(app);
 
-function fromDbApprovalMode(value: DbApprovalMode): ApprovalMode {
+function fromDbApprovalMode(value: string): ApprovalMode {
   return value === DbApprovalMode.ALLOW_ALL ? "allow-all" : value === DbApprovalMode.SESSION_SCOPED ? "session-scoped" : "interactive";
 }
 
@@ -58,9 +37,14 @@ function toDbApprovalMode(value: ApprovalMode): DbApprovalMode {
   return value === "allow-all" ? DbApprovalMode.ALLOW_ALL : value === "session-scoped" ? DbApprovalMode.SESSION_SCOPED : DbApprovalMode.INTERACTIVE;
 }
 
-function statusName(value: SessionStatus): "idle" | "queued" | "running" | "waiting-approval" | "error" {
+function statusName(value: string): "idle" | "queued" | "running" | "waiting-approval" | "error" {
   const map = { IDLE: "idle", QUEUED: "queued", RUNNING: "running", WAITING_APPROVAL: "waiting-approval", ERROR: "error" } as const;
-  return map[value];
+  return map[value as keyof typeof map] ?? "error";
+}
+
+function approvalScopesFromDb(value: Prisma.JsonValue): ApprovalScope[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((scope): scope is ApprovalScope => scope === "shell" || scope === "url" || scope === "private-script");
 }
 
 function serializeSession(session: DbChatSession) {
@@ -71,7 +55,7 @@ function serializeSession(session: DbChatSession) {
     repositoryName: session.repositoryName,
     model: session.model,
     approvalMode: fromDbApprovalMode(session.approvalMode),
-    approvalScopes: session.approvalScopes,
+    approvalScopes: approvalScopesFromDb(session.approvalScopes),
     status: statusName(session.status),
     branch: session.branch,
     headSha: session.headSha,
@@ -81,41 +65,37 @@ function serializeSession(session: DbChatSession) {
   };
 }
 
-async function localWorkerRequest<T>(pathname: string, body: unknown, timeoutMs = 30_000): Promise<T> {
-  if (!config.WORKER_CONTROL_TOKEN) throw new Error("Local Worker control is not configured");
+async function workerRequest<T>(pathname: string, body: unknown, timeoutMs = 30_000): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${config.LOCAL_WORKER_URL}${pathname}`, {
+    const response = await fetch(`${config.WORKER_CONTROL_URL}${pathname}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${config.WORKER_CONTROL_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: controller.signal
     });
     const result = await response.json().catch(() => ({ error: response.statusText })) as T & { error?: string };
-    if (!response.ok) throw new Error(result.error ?? `Local Worker returned ${response.status}`);
+    if (!response.ok) throw new Error(result.error ?? `Worker returned ${response.status}`);
     return result;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function checkLocalWorker(): Promise<void> {
+async function checkWorker(): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2_000);
   try {
-    const response = await fetch(`${config.LOCAL_WORKER_URL}/health/ready`, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Local Worker health returned ${response.status}`);
+    const response = await fetch(`${config.WORKER_CONTROL_URL}/health/ready`, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Worker health returned ${response.status}`);
   } finally {
     clearTimeout(timeout);
   }
 }
 
 async function appendEvent(sessionId: string, turnId: string | null, kind: string, data: Record<string, unknown>) {
-  const event = await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
-  const serialized = { cursor: Number(event.cursor), sessionId, turnId, kind, data, createdAt: event.createdAt.toISOString() };
-  if (redis) await redis.publish(`${SESSION_EVENT_CHANNEL_PREFIX}${sessionId}`, JSON.stringify(serialized));
-  return serialized;
+  await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
 }
 
 async function rejectPendingPermissions(sessionId: string, userId: string, reason: string) {
@@ -127,27 +107,20 @@ async function rejectPendingPermissions(sessionId: string, userId: string, reaso
     });
     if (changed.count === 0) continue;
     await db.auditLog.create({ data: { userId, action: "permission.denied-by-lifecycle", targetId: permission.id, metadata: { sessionId, scope: permission.scope, reason } } });
-    if (redis) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${permission.id}`, "deny");
     await appendEvent(sessionId, permission.turnId, "permission.completed", { requestId: permission.id, decision: "deny", reason });
   }
 }
 
 async function requestWorkerStop(session: { id: string; sdkSessionId: string }, requestedBy: string, reason: string): Promise<void> {
-  if (redis && controls) {
-    await redis.publish(`${STOP_CHANNEL_PREFIX}${session.id}`, JSON.stringify({ requestedBy, reason }));
-    await controls.add("stop-session", { sessionId: session.id, sdkSessionId: session.sdkSessionId }, { removeOnComplete: 100, removeOnFail: 100 });
-    return;
-  }
-  await localWorkerRequest(`/sessions/${session.id}/stop`, { sdkSessionId: session.sdkSessionId, requestedBy, reason });
+  await workerRequest(`/sessions/${session.id}/stop`, { sdkSessionId: session.sdkSessionId, requestedBy, reason });
 }
 
 app.get("/health/live", async () => ({ status: "ok" }));
 app.get("/health/ready", async (_request, reply) => {
   try {
     await db.$queryRaw`SELECT 1`;
-    if (redis) await redis.ping();
-    else await checkLocalWorker();
-    return { status: "ready", databaseMode, coordinationBackend: config.COORDINATION_BACKEND };
+    await checkWorker();
+    return { status: "ready", database: "sqlite" };
   } catch {
     return reply.code(503).send({ status: "not-ready" });
   }
@@ -169,7 +142,7 @@ app.get("/api/me", async (request, reply) => {
 app.get("/api/runtime", async (request, reply) => {
   const auth = await authenticate(request, reply);
   if (!(auth && "user" in auth)) return;
-  return { sandboxBackend: config.SANDBOX_BACKEND, coordinationBackend: config.COORDINATION_BACKEND };
+  return { sandboxBackend: config.SANDBOX_BACKEND };
 });
 
 app.post("/api/auth/logout", async (request, reply) => {
@@ -208,11 +181,7 @@ app.get("/api/models", async (request, reply) => {
   const auth = await authenticate(request, reply);
   if (!(auth && "user" in auth)) return;
   try {
-    if (controls && controlEvents) {
-      const job = await controls.add("list-models", { githubAccountId: auth.account.id }, { removeOnComplete: 100, removeOnFail: 100 });
-      return await job.waitUntilFinished(controlEvents, 30_000);
-    }
-    return await localWorkerRequest("/models", { githubAccountId: auth.account.id });
+    return await workerRequest("/models", { githubAccountId: auth.account.id });
   } catch {
     return [{ id: "auto", name: "Auto", supportsReasoning: false }];
   }
@@ -285,7 +254,7 @@ app.patch<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply
   const parsed = updateSessionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid update", details: parsed.error.flatten() });
   const nextMode = parsed.data.approvalMode ?? fromDbApprovalMode(session.approvalMode);
-  const nextScopes = parsed.data.approvalScopes ?? session.approvalScopes;
+  const nextScopes = parsed.data.approvalScopes ?? approvalScopesFromDb(session.approvalScopes);
   if (nextMode !== "session-scoped" && nextScopes.length > 0) return reply.code(400).send({ error: "Approval scopes are only valid in session-scoped mode" });
   const updated = await db.chatSession.update({ where: { id: session.id }, data: {
     ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
@@ -311,13 +280,7 @@ app.delete<{ Params: { id: string } }>("/api/sessions/:id", async (request, repl
     ]);
     await rejectPendingPermissions(session.id, auth.user.id, "delete");
     try {
-      if (redis && controls && controlEvents) {
-        await redis.publish(`${STOP_CHANNEL_PREFIX}${session.id}`, JSON.stringify({ requestedBy: auth.user.id, reason: "delete" }));
-        const job = await controls.add("delete-session", { sessionId: session.id, sdkSessionId: session.sdkSessionId }, { removeOnComplete: true, removeOnFail: 100 });
-        await job.waitUntilFinished(controlEvents, 30_000);
-      } else {
-        await localWorkerRequest(`/sessions/${session.id}/delete`, { sdkSessionId: session.sdkSessionId, requestedBy: auth.user.id }, 45_000);
-      }
+      await workerRequest(`/sessions/${session.id}/delete`, { sdkSessionId: session.sdkSessionId, requestedBy: auth.user.id }, 45_000);
     } catch (error) {
       request.log.error(error, "Failed to delete SDK session state");
       return reply.code(503).send({ error: "Session deletion could not be completed" });
@@ -351,15 +314,6 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/messages", async (reques
     return created;
   });
   await appendEvent(session.id, turn.id, "turn.queued", { turnId: turn.id, content: parsed.data.content });
-  if (turns) {
-    await turns.add("run-turn", { sessionId: session.id, turnId: turn.id }, {
-      jobId: turn.id,
-      attempts: 50,
-      backoff: { type: "fixed", delay: 1_000 },
-      removeOnComplete: 500,
-      removeOnFail: 500
-    });
-  }
   return reply.code(202).send({ turnId: turn.id, status: "queued" });
 });
 
@@ -373,7 +327,7 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/stop", async (request, r
     db.chatSession.update({ where: { id: session.id }, data: { status: SessionStatus.IDLE } })
   ]);
   await rejectPendingPermissions(session.id, auth.user.id, "stop");
-  await requestWorkerStop(session, auth.user.id, "stop").catch((error) => request.log.error(error, "Failed to signal local Worker stop"));
+  await requestWorkerStop(session, auth.user.id, "stop").catch((error) => request.log.error(error, "Failed to signal Worker stop"));
   return reply.code(202).send({ status: "stopping" });
 });
 
@@ -391,7 +345,6 @@ app.post<{ Params: { id: string; requestId: string } }>("/api/sessions/:id/permi
     db.permissionRequest.update({ where: { id: permission.id }, data: { status, decidedAt: new Date() } }),
     db.auditLog.create({ data: { userId: auth.user.id, action: `permission.${parsed.data.decision}`, targetId: permission.id, metadata: { sessionId: session.id, scope: permission.scope } } })
   ]);
-  if (redis) await redis.publish(`${PERMISSION_DECISION_CHANNEL_PREFIX}${permission.id}`, parsed.data.decision);
   await appendEvent(session.id, permission.turnId, "permission.completed", { requestId: permission.id, decision: parsed.data.decision });
   return { status: parsed.data.decision };
 });
@@ -405,6 +358,7 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
   const cursorText = request.query.after ?? (typeof headerCursor === "string" ? headerCursor : "0");
   if (!/^\d+$/.test(cursorText)) return reply.code(400).send({ error: "Invalid event cursor" });
   const after = BigInt(cursorText);
+  try { toDatabaseCursor(after); } catch { return reply.code(400).send({ error: "Invalid event cursor" }); }
   let lastSent = after;
   const write = (event: { cursor: number; kind: string } & Record<string, unknown>) => {
     const cursor = BigInt(event.cursor);
@@ -420,30 +374,6 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
     "X-Accel-Buffering": "no"
   });
   const heartbeat = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
-  if (redis) {
-    const channel = `${SESSION_EVENT_CHANNEL_PREFIX}${session.id}`;
-    const eventSubscriber = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
-    let replaying = true;
-    const buffered: Array<{ cursor: number; kind: string } & Record<string, unknown>> = [];
-    const listener = (incomingChannel: string, message: string) => {
-      if (incomingChannel !== channel) return;
-      const event = JSON.parse(message) as { cursor: number; kind: string } & Record<string, unknown>;
-      if (replaying) buffered.push(event); else write(event);
-    };
-    eventSubscriber.on("message", listener);
-    await eventSubscriber.subscribe(channel);
-    const backlog = await db.sessionEvent.findMany({ where: { sessionId: session.id, cursor: { gt: toDatabaseCursor(after) } }, orderBy: { cursor: "asc" }, take: 2_000 });
-    for (const event of backlog) write({ cursor: Number(event.cursor), kind: event.kind, sessionId: event.sessionId, turnId: event.turnId, data: event.data, createdAt: event.createdAt.toISOString() });
-    replaying = false;
-    buffered.sort((left, right) => left.cursor - right.cursor).forEach(write);
-    request.raw.on("close", () => {
-      clearInterval(heartbeat);
-      eventSubscriber.off("message", listener);
-      void eventSubscriber.quit();
-    });
-    return;
-  }
-
   let closed = false;
   request.raw.on("close", () => {
     closed = true;
@@ -457,10 +387,10 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
         take: 2_000
       });
       for (const event of backlog) write({ cursor: Number(event.cursor), kind: event.kind, sessionId: event.sessionId, turnId: event.turnId, data: event.data, createdAt: event.createdAt.toISOString() });
-      if (backlog.length < 2_000) await new Promise((resolve) => setTimeout(resolve, config.LOCAL_POLL_INTERVAL_MS));
+      if (backlog.length < 2_000) await new Promise((resolve) => setTimeout(resolve, config.EVENT_POLL_INTERVAL_MS));
     }
   })().catch((error) => {
-    request.log.error(error, "Local SSE polling failed");
+    request.log.error(error, "SSE polling failed");
     if (!closed) reply.raw.end();
   });
 });
@@ -468,11 +398,7 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
 app.addHook("onClose", async () => {
   registry.close();
   await Promise.all([
-    turns?.close(),
-    controls?.close(),
-    controlEvents?.close(),
     app.ephemeral.close(),
-    redis?.quit(),
     db.$disconnect()
   ]);
 });

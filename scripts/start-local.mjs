@@ -13,18 +13,10 @@ for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_RO
 }
 
 process.env.NODE_ENV = "production";
-process.env.DATABASE_MODE ??= "local";
-process.env.COORDINATION_BACKEND ??= "local";
 process.env.SANDBOX_BACKEND ??= "local";
-process.env.WORKER_CONCURRENCY ??= process.env.LOCAL_WORKER_CONCURRENCY ?? "2";
+process.env.WORKER_CONCURRENCY ??= "2";
 process.env.API_INTERNAL_URL ??= "http://127.0.0.1:4000";
 
-if (process.env.DATABASE_MODE !== "local") {
-  throw new Error("start:local requires DATABASE_MODE=local");
-}
-if (process.env.COORDINATION_BACKEND !== "local") {
-  throw new Error("start:local requires COORDINATION_BACKEND=local");
-}
 if (process.env.SANDBOX_BACKEND !== "local") {
   throw new Error("start:local requires SANDBOX_BACKEND=local");
 }

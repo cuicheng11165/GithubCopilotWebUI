@@ -15,11 +15,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "pnpm --filter @app/db generate",
-    "db:migrate": "pnpm db:migrate:local",
-    "db:migrate:local": "pnpm --filter @app/db migrate:local",
-    "db:migrate:multi-user": "pnpm --filter @app/db migrate:multi-user",
-    "db:migrate:dev:local": "pnpm --filter @app/db exec node scripts/sqlite-prisma.mjs migrate dev",
-    "db:migrate:dev:multi-user": "pnpm --filter @app/db prisma migrate dev --schema prisma/schema.prisma",
+    "db:migrate": "pnpm --filter @app/db migrate",
+    "db:migrate:dev": "pnpm --filter @app/db exec node scripts/sqlite-prisma.mjs migrate dev",
     "db:validate": "pnpm --filter @app/db validate"
   },
   "devDependencies": {

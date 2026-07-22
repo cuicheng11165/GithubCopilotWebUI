@@ -3,11 +3,11 @@ name: copilot-web-ui
 x-app-env: &app-env
   NODE_ENV: production
   PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
-  DATABASE_MODE: local
-  COORDINATION_BACKEND: redis
   DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
-  REDIS_URL: redis://redis:6379
   SANDBOX_BACKEND: container
+  WORKER_CONTROL_URL: http://worker:4200
+  WORKER_CONTROL_TOKEN: ${WORKER_CONTROL_TOKEN}
+  EVENT_POLL_INTERVAL_MS: ${EVENT_POLL_INTERVAL_MS:-200}
   COOKIE_SECRET: ${COOKIE_SECRET}
   TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
   REPOSITORIES_CONFIG: /config/repositories.yaml
@@ -22,21 +22,9 @@ x-app-env: &app-env
   GHE_ALLOWED_ENTERPRISES: ${GHE_ALLOWED_ENTERPRISES:-}
 
 services:
-  redis:
-    image: redis:7.4-alpine
-    command: [redis-server, --appendonly, "yes"]
-    volumes: [redis-data:/data]
-    healthcheck:
-      test: [CMD, redis-cli, ping]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   migrate:
     build: { context: ., target: api }
     environment:
-      DATABASE_MODE: local
       DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
     command: [node, packages/db/scripts/sqlite-prisma.mjs, migrate, deploy]
     volumes: ["${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"]
@@ -82,7 +70,7 @@ services:
       sandbox-image: { condition: service_completed_successfully }
       egress-proxy: { condition: service_started }
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://localhost:4100/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4100/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -105,9 +93,9 @@ services:
     networks: [app]
     depends_on:
       migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
+      worker: { condition: service_healthy }
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://localhost:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -117,17 +105,18 @@ services:
     build: { context: ., target: worker }
     environment:
       NODE_ENV: production
-      DATABASE_MODE: local
-      COORDINATION_BACKEND: redis
       DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
-      REDIS_URL: redis://redis:6379
+      WORKER_CONTROL_HOST: 0.0.0.0
+      WORKER_CONTROL_PORT: 4200
+      WORKER_CONTROL_TOKEN: ${WORKER_CONTROL_TOKEN}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-200}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       REPOSITORIES_CONFIG: /config/repositories.yaml
       SANDBOX_RUNNER_URL: http://sandbox-runner:4100
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN}
       SANDBOX_BACKEND: container
       COPILOT_HOME: /var/lib/copilot-data/copilot
-      WORKER_CONCURRENCY: ${LOCAL_WORKER_CONCURRENCY:-2}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
@@ -139,8 +128,12 @@ services:
     networks: [app]
     depends_on:
       migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
       sandbox-runner: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4200/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
     restart: unless-stopped
 
   web:
@@ -152,9 +145,6 @@ services:
     depends_on:
       api: { condition: service_healthy }
     restart: unless-stopped
-
-volumes:
-  redis-data:
 
 networks:
   app:
