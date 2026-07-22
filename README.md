@@ -102,7 +102,7 @@ cp .env.example .env
 cp config/repositories.example.yaml config/repositories.yaml
 ```
 
-Set the repository to an absolute local path, configure the GitHub App values and secrets, and keep these native settings:
+Set the repository to an absolute local path, configure the GitHub App values and secrets, and keep these native settings. Native installations also need `git` and `rg` (ripgrep) on `PATH`:
 
 ```dotenv
 DATABASE_MODE=local
@@ -136,6 +136,39 @@ Open `http://localhost:3000`. The local starter launches Web, API, Worker, and s
 
 > **No isolation in local execution mode:** approved commands and private scripts can modify the repository, read any host file available to the current user, start processes, and access the host network. Interactive and Session scoped approvals control when a process starts; they do not restrict the process after launch. Do not expose this mode to untrusted users.
 
+### Windows native deployment
+
+Use 64-bit Node.js 22 or newer, Git for Windows, and ripgrep from PowerShell. Windows paths may use forward slashes, which avoids `.env` and YAML escaping issues:
+
+For complete native, Docker Desktop, service startup, backup, upgrade, and troubleshooting instructions, see the [Windows deployment guide](./docs/windows-deployment.md).
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item config/repositories.example.yaml config/repositories.yaml
+corepack pnpm install
+corepack pnpm db:migrate:local
+corepack pnpm build
+corepack pnpm start:local
+```
+
+For example, native `config/repositories.yaml` can contain:
+
+```yaml
+repositories:
+  - id: example
+    displayName: Example Repository
+    path: C:/src/example
+    enabled: true
+```
+
+Generate values for the four service secrets with Node, changing `48` to `32` for `TOKEN_ENCRYPTION_KEY`:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(48).toString('base64'))"
+```
+
+In Windows local mode, agent shell commands run through `cmd.exe`. Private scripts with `interpreter: shell` run through Windows PowerShell; Node and Python private scripts are launched directly without shell quoting. Stopping or timing out a command terminates its Windows process tree.
+
 ## Run with Docker Compose and SQLite
 
 ```bash
@@ -159,6 +192,19 @@ docker compose up --build
 ```
 
 Open `http://localhost:3000`. API health is available at `http://localhost:4000/health/ready`.
+
+### Windows deployment with Docker Desktop
+
+Use Docker Desktop in Linux-container mode. Keep the repository's container path separate from its Windows host path in `.env`:
+
+```dotenv
+REPO_ROOT=/repo
+REPO_HOST_PATH=C:/src/example
+REPO_CONTAINER_PATH=/repo
+REPOSITORIES_CONFIG_FILE=./config/repositories.yaml
+```
+
+For this Compose deployment, set the repository `path` in `config/repositories.yaml` to `/repo`. Then run `docker compose up --build` from PowerShell. Compose mounts `C:/src/example` read-only at `/repo` in the Linux API, Worker, and Sandbox Runner containers. The default `/var/run/docker.sock` setting is intended for Docker Desktop's Linux engine.
 
 The first run creates:
 

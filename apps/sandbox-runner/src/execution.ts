@@ -22,6 +22,8 @@ interface BaseExecutionInput {
 export interface LocalExecutionInput extends BaseExecutionInput {
   repositoryPath: string;
   tempRoot: string;
+  executable?: string;
+  args?: string[];
 }
 
 export interface ContainerExecutionInput extends BaseExecutionInput {
@@ -53,6 +55,17 @@ function capture(state: CaptureState, target: "stdout" | "stderr", chunk: Buffer
 
 function terminateProcess(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+    killer.once("error", () => child.kill("SIGKILL"));
+    killer.once("exit", (code) => {
+      if (code !== 0 && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    });
+    return;
+  }
   if (process.platform !== "win32" && child.pid) {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -62,6 +75,16 @@ function terminateProcess(child: ChildProcess) {
     }
   }
   child.kill("SIGKILL");
+}
+
+export function localShellCommand(command: string, platform = process.platform, environment = process.env) {
+  if (platform === "win32") {
+    return {
+      executable: environment.ComSpec ?? environment.COMSPEC ?? "cmd.exe",
+      args: ["/d", "/s", "/c", command]
+    };
+  }
+  return { executable: "/bin/sh", args: ["-lc", command] };
 }
 
 async function waitForChild(child: ChildProcess, state: CaptureState, timeoutSeconds: number, onTimeout: () => void): Promise<ExecutionResult> {
@@ -94,18 +117,28 @@ export class ExecutionManager {
     await mkdir(input.tempRoot, { recursive: true });
     const tempDirectory = await mkdtemp(path.join(input.tempRoot, `${input.sessionId}-`));
     const processes = this.localProcesses.get(input.sessionId) ?? new Set<ChildProcess>();
-    const child = spawn("/bin/sh", ["-lc", input.command], {
+    const invocation = input.executable
+      ? { executable: input.executable, args: input.args ?? [] }
+      : localShellCommand(input.command);
+    const child = spawn(invocation.executable, invocation.args, {
       cwd: input.repositoryPath,
       detached: process.platform !== "win32",
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        PATH: process.env.PATH ?? (process.platform === "win32" ? "C:\\Windows\\System32;C:\\Windows" : "/usr/local/bin:/usr/bin:/bin"),
         HOME: tempDirectory,
         TMPDIR: tempDirectory,
         TMP: tempDirectory,
         TEMP: tempDirectory,
         XDG_CACHE_HOME: path.join(tempDirectory, "cache"),
-        LANG: process.env.LANG ?? "C.UTF-8"
+        LANG: process.env.LANG ?? "C.UTF-8",
+        ...(process.platform === "win32" ? {
+          ComSpec: process.env.ComSpec ?? process.env.COMSPEC ?? "C:\\Windows\\System32\\cmd.exe",
+          SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+          WINDIR: process.env.WINDIR ?? process.env.SystemRoot ?? "C:\\Windows",
+          PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD"
+        } : {})
       }
     });
     processes.add(child);

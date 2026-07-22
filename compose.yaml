@@ -72,7 +72,10 @@ services:
       COMMAND_MAX_OUTPUT_BYTES: ${COMMAND_MAX_OUTPUT_BYTES:-1048576}
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
-      - ${REPO_ROOT}:${REPO_ROOT}:ro
+      - type: bind
+        source: ${REPO_HOST_PATH:-${REPO_ROOT}}
+        target: ${REPO_CONTAINER_PATH:-${REPO_ROOT}}
+        read_only: true
       - ${CONTAINER_RUNTIME_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     networks: [app, sandbox-internal]
     depends_on:
@@ -93,7 +96,10 @@ services:
       API_PORT: 4000
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
-      - ${REPO_ROOT}:${REPO_ROOT}:ro
+      - type: bind
+        source: ${REPO_HOST_PATH:-${REPO_ROOT}}
+        target: ${REPO_CONTAINER_PATH:-${REPO_ROOT}}
+        read_only: true
       - "${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"
     ports: ["4000:4000"]
     networks: [app]
@@ -125,7 +131,10 @@ services:
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
-      - ${REPO_ROOT}:${REPO_ROOT}:ro
+      - type: bind
+        source: ${REPO_HOST_PATH:-${REPO_ROOT}}
+        target: ${REPO_CONTAINER_PATH:-${REPO_ROOT}}
+        read_only: true
       - "${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"
     networks: [app]
     depends_on:

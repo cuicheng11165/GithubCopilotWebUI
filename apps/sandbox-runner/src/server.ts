@@ -40,6 +40,8 @@ const executeSchema = z.object({
   repositoryId: z.string(),
   sessionId: z.string().uuid(),
   command: z.string().min(1).max(100_000),
+  executable: z.string().min(1).max(32_768).optional(),
+  args: z.array(z.string().max(32_768)).max(256).optional(),
   timeoutSeconds: z.number().int().positive().max(600).optional()
 });
 
@@ -55,7 +57,12 @@ app.post("/execute", async (request, reply) => {
     maxOutputBytes: env.COMMAND_MAX_OUTPUT_BYTES
   };
   if (env.SANDBOX_BACKEND === "local") {
-    return executions.executeLocal({ ...common, repositoryPath: repository.canonicalPath, tempRoot: env.LOCAL_SANDBOX_TMP_ROOT });
+    return executions.executeLocal({
+      ...common,
+      repositoryPath: repository.canonicalPath,
+      tempRoot: env.LOCAL_SANDBOX_TMP_ROOT,
+      ...(parsed.data.executable ? { executable: parsed.data.executable, args: parsed.data.args ?? [] } : {})
+    });
   }
   const image = repository.sandboxImage ?? env.SANDBOX_DEFAULT_IMAGE;
   if (!allowedImages.has(image)) return reply.code(400).send({ error: "Repository references a sandbox image that is not allowlisted" });
