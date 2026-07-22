@@ -34,7 +34,7 @@ export function ChatApp() {
       const user = await getMe(); setMe(user);
       const [sessionData, repositoryData, runtimeData] = await Promise.all([getSessions(), getRepositories(), getRuntime()]);
       setSessions(sessionData); setRepositories(repositoryData); setSandboxBackend(runtimeData.sandboxBackend); setActiveId(sessionData[0]?.id ?? null);
-      void getModels().then(setModels).catch(() => undefined);
+      void getModels().then((available) => setModels([...new Map(available.map((model) => [model.id, model])).values()])).catch(() => undefined);
     } catch (caught) { if (caught instanceof ApiError && caught.status === 401) window.location.href = "/login"; else setError(caught instanceof Error ? caught.message : "Failed to load the app"); }
   })(); }, []);
 

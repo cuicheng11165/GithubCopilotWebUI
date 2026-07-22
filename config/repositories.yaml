@@ -1,0 +1,6 @@
+repositories:
+  - id: copilotdeck
+    displayName: CopilotDeck
+    path: /Users/cuicheng/Documents/Github/CopilotDeck
+    enabled: true
+    sandboxImage: copilot-web-sandbox:local

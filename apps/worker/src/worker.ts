@@ -65,21 +65,44 @@ const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
 await registry.load();
 registry.watch((error) => console.error("Repository config reload failed", error));
 const copilotRuntimeEnv = {
-  PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+  PATH: process.env.PATH ?? (process.platform === "win32" ? "C:\\Windows\\System32;C:\\Windows" : "/usr/local/bin:/usr/bin:/bin"),
   HOME: env.COPILOT_HOME,
+  ...(process.platform === "win32" ? {
+    USERPROFILE: env.COPILOT_HOME,
+    ComSpec: process.env.ComSpec ?? process.env.COMSPEC ?? "C:\\Windows\\System32\\cmd.exe",
+    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+    WINDIR: process.env.WINDIR ?? process.env.SystemRoot ?? "C:\\Windows",
+    PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD"
+  } : {}),
   COPILOT_HOME: env.COPILOT_HOME,
   COPILOT_INTEGRATION_ID: "copilot-web-ui",
   ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
   ...(process.env.HTTPS_PROXY ? { HTTPS_PROXY: process.env.HTTPS_PROXY } : {}),
   ...(process.env.NO_PROXY ? { NO_PROXY: process.env.NO_PROXY } : {})
 };
-const client = new CopilotClient({
-  mode: "empty",
-  baseDirectory: env.COPILOT_HOME,
-  useLoggedInUser: false,
-  env: copilotRuntimeEnv
-});
-await client.start();
+const copilotClients = new Map<string, CopilotClient>();
+
+function copilotHostKey(host: string): string {
+  return host.trim().toLowerCase() || "github.com";
+}
+
+async function getCopilotClient(host: string): Promise<CopilotClient> {
+  const key = copilotHostKey(host);
+  const existing = copilotClients.get(key);
+  if (existing) return existing;
+  const client = new CopilotClient({
+    mode: "empty",
+    baseDirectory: key === "github.com" ? env.COPILOT_HOME : path.join(env.COPILOT_HOME, "runtimes", key),
+    useLoggedInUser: false,
+    env: {
+      ...copilotRuntimeEnv,
+      ...(key === "github.com" ? {} : { COPILOT_GH_HOST: key })
+    }
+  });
+  await client.start();
+  copilotClients.set(key, client);
+  return client;
+}
 const activeSessions = new Map<string, { session: CopilotSession; turnId: string }>();
 const stopRequested = new Set<string>();
 const localSessionLocks = new Set<string>();
@@ -127,7 +150,7 @@ async function prepareSkillView(sessionId: string, skills: Awaited<ReturnType<ty
   for (const [index, skill] of selected.entries()) {
     const parent = path.join(view, String(index).padStart(3, "0"));
     await mkdir(parent);
-    await symlink(skill.directory, path.join(parent, path.basename(skill.directory)), "dir");
+    await symlink(skill.directory, path.join(parent, path.basename(skill.directory)), process.platform === "win32" ? "junction" : "dir");
     directories.push(parent);
   }
   return directories;
@@ -270,6 +293,27 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: async ({ script, args = [], interpreter = "direct" }) => {
         const absolute = await resolveRepositoryPath(repository, script);
         const relative = path.relative(repository.canonicalPath, absolute);
+        if (env.SANDBOX_BACKEND === "local") {
+          const executable = interpreter === "shell"
+            ? (process.platform === "win32" ? "powershell.exe" : "/bin/sh")
+            : interpreter === "node"
+              ? "node"
+              : interpreter === "python"
+                ? (process.platform === "win32" ? "python" : "python3")
+                : absolute;
+          const executableArgs = interpreter === "shell" && process.platform === "win32"
+            ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", absolute, ...args]
+            : interpreter === "direct"
+              ? args
+              : [absolute, ...args];
+          return sandboxRequest("/execute", {
+            repositoryId: repository.id,
+            sessionId,
+            command: `Run private script ${relative}`,
+            executable,
+            args: executableArgs
+          });
+        }
         const executable = interpreter === "shell" ? "/bin/sh" : interpreter === "node" ? "node" : interpreter === "python" ? "python3" : "";
         const portableRelative = relative.split(path.sep).join("/");
         const command = [executable, `./${portableRelative}`, ...args].filter(Boolean).map(quote).join(" ");
@@ -303,6 +347,7 @@ async function runTurn(job: TurnJobLike) {
     ]);
     await appendEvent(turn.session.id, turn.id, "turn.started", { branch: git.branch, headSha: git.headSha, dirty: git.dirty });
     const token = decryptToken(turn.session.githubAccount.encryptedAccessToken);
+    const client = await getCopilotClient(turn.session.githubAccount.host);
     const tools = createTools(repository, turn.session.id);
     const skillDirectories = await prepareSkillView(turn.session.id, skills);
     const sessionOptions = {
@@ -393,7 +438,14 @@ async function handleControl(name: string, data: Record<string, unknown>) {
   if (name === "list-models") {
     const account = await db.gitHubAccount.findUniqueOrThrow({ where: { id: String(data.githubAccountId) } });
     const token = decryptToken(account.encryptedAccessToken);
-    const modelClient = new CopilotClient({ mode: "empty", baseDirectory: path.join(env.COPILOT_HOME, "model-clients", account.id), gitHubToken: token, useLoggedInUser: false, env: copilotRuntimeEnv });
+    const host = copilotHostKey(account.host);
+    const modelClient = new CopilotClient({
+      mode: "empty",
+      baseDirectory: path.join(env.COPILOT_HOME, "model-clients", account.id),
+      gitHubToken: token,
+      useLoggedInUser: false,
+      env: { ...copilotRuntimeEnv, ...(host === "github.com" ? {} : { COPILOT_GH_HOST: host }) }
+    });
     try {
       await modelClient.start();
       const models = await modelClient.listModels();
@@ -421,6 +473,8 @@ async function handleControl(name: string, data: Record<string, unknown>) {
     if (!deleteLocked) throw new Error("Session deletion is already in progress");
     if (!redis) localDeleteLocks.add(sessionId);
     try {
+      const session = await db.chatSession.findUniqueOrThrow({ where: { id: sessionId }, include: { githubAccount: { select: { host: true } } } });
+      const client = await getCopilotClient(session.githubAccount.host);
       await client.deleteSession(String(data.sdkSessionId)).catch((error) => {
         if (!(error instanceof Error && error.message.toLowerCase().includes("not found"))) throw error;
       });
@@ -576,7 +630,7 @@ async function shutdown() {
   }
   await Promise.allSettled([...localExecutions]);
   await Promise.all([turnWorker?.close(), controlWorker?.close(), controlServer ? new Promise<void>((resolve) => controlServer.close(() => resolve())) : undefined]);
-  await client.stop();
+  await Promise.allSettled([...copilotClients.values()].map((client) => client.stop()));
   registry.close();
   await Promise.all([subscriber?.quit(), redis?.quit(), db.$disconnect()]);
 }
