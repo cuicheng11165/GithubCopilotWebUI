@@ -7,14 +7,19 @@
     "node": ">=22"
   },
   "scripts": {
+    "postinstall": "pnpm db:generate",
     "build": "pnpm -r build",
-    "dev": "pnpm --parallel --filter '@app/*' dev",
+    "dev": "node scripts/dev.mjs",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:generate": "pnpm --filter @app/db prisma generate",
-    "db:migrate": "pnpm --filter @app/db prisma migrate deploy",
-    "db:migrate:dev": "pnpm --filter @app/db prisma migrate dev"
+    "db:generate": "pnpm --filter @app/db generate",
+    "db:migrate": "pnpm db:migrate:local",
+    "db:migrate:local": "pnpm --filter @app/db migrate:local",
+    "db:migrate:multi-user": "pnpm --filter @app/db migrate:multi-user",
+    "db:migrate:dev:local": "pnpm --filter @app/db exec node scripts/sqlite-prisma.mjs migrate dev",
+    "db:migrate:dev:multi-user": "pnpm --filter @app/db prisma migrate dev --schema prisma/schema.prisma",
+    "db:validate": "pnpm --filter @app/db validate"
   },
   "devDependencies": {
     "@types/node": "22.15.30",

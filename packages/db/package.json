@@ -7,6 +7,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate": "prisma generate --schema prisma/schema.prisma && prisma generate --schema prisma-sqlite/schema.prisma",
+    "migrate:local": "node scripts/sqlite-prisma.mjs migrate deploy",
+    "migrate:multi-user": "prisma migrate deploy --schema prisma/schema.prisma",
+    "validate": "node scripts/validate.mjs",
     "prisma": "prisma"
   },
   "dependencies": {

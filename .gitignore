@@ -10,4 +10,9 @@ coverage/
 *.log
 data/
 packages/db/prisma/dev.db
+packages/db/prisma-sqlite/dev.db
+packages/db/generated/
+data/*.db
+data/*.db-shm
+data/*.db-wal
 apps/web/next-env.d.ts

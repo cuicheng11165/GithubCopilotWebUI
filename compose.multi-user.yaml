@@ -2,9 +2,9 @@ name: copilot-web-ui
 
 x-app-env: &app-env
   NODE_ENV: production
+  DATABASE_MODE: multi-user
   PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
-  DATABASE_MODE: local
-  DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
+  DATABASE_URL: postgresql://copilot:${POSTGRES_PASSWORD:-copilot}@postgres:5432/copilot
   REDIS_URL: redis://redis:6379
   COOKIE_SECRET: ${COOKIE_SECRET}
   TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
@@ -20,6 +20,20 @@ x-app-env: &app-env
   GHE_ALLOWED_ENTERPRISES: ${GHE_ALLOWED_ENTERPRISES:-}
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot}
+      POSTGRES_DB: copilot
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U copilot]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   redis:
     image: redis:7.4-alpine
     command: [redis-server, --appendonly, "yes"]
@@ -34,10 +48,11 @@ services:
   migrate:
     build: { context: ., target: api }
     environment:
-      DATABASE_MODE: local
-      DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
-    command: [node, packages/db/scripts/sqlite-prisma.mjs, migrate, deploy]
-    volumes: ["${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"]
+      DATABASE_MODE: multi-user
+      DATABASE_URL: postgresql://copilot:${POSTGRES_PASSWORD:-copilot}@postgres:5432/copilot
+    command: [node, packages/db/node_modules/prisma/build/index.js, migrate, deploy, --schema, packages/db/prisma/schema.prisma]
+    depends_on:
+      postgres: { condition: service_healthy }
     restart: "no"
 
   sandbox-image:
@@ -89,7 +104,6 @@ services:
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
       - ${REPO_ROOT}:${REPO_ROOT}:ro
-      - "${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"
     ports: ["4000:4000"]
     networks: [app]
     depends_on:
@@ -106,20 +120,20 @@ services:
     build: { context: ., target: worker }
     environment:
       NODE_ENV: production
-      DATABASE_MODE: local
-      DATABASE_URL: file:/var/lib/copilot-data/copilot.db?connection_limit=1
+      DATABASE_MODE: multi-user
+      DATABASE_URL: postgresql://copilot:${POSTGRES_PASSWORD:-copilot}@postgres:5432/copilot
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       REPOSITORIES_CONFIG: /config/repositories.yaml
       SANDBOX_RUNNER_URL: http://sandbox-runner:4100
       SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN}
-      COPILOT_HOME: /var/lib/copilot-data/copilot
-      WORKER_CONCURRENCY: ${LOCAL_WORKER_CONCURRENCY:-2}
+      COPILOT_HOME: /var/lib/copilot
+      WORKER_CONCURRENCY: ${MULTI_USER_WORKER_CONCURRENCY:-8}
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}
     volumes:
       - ${REPOSITORIES_CONFIG_FILE:-./config/repositories.example.yaml}:/config/repositories.yaml:ro
       - ${REPO_ROOT}:${REPO_ROOT}:ro
-      - "${LOCAL_DATA_DIR:-./data}:/var/lib/copilot-data"
+      - copilot-state:/var/lib/copilot
     networks: [app]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -138,7 +152,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   redis-data:
+  copilot-state:
 
 networks:
   app:

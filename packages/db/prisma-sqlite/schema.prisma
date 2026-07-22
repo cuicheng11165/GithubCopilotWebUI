@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String          @id @default(uuid())
+  login          String
+  displayName    String?
+  avatarUrl      String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  githubAccounts GitHubAccount[]
+  webSessions    WebSession[]
+  chatSessions   ChatSession[]
+  auditLogs      AuditLog[]
+}
+
+model GitHubAccount {
+  id                    String        @id @default(uuid())
+  userId                String
+  provider              String
+  providerUserId        String
+  host                   String
+  encryptedAccessToken  String
+  encryptedRefreshToken String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  user                  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webSessions           WebSession[]
+  chatSessions          ChatSession[]
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+model WebSession {
+  id              String        @id @default(uuid())
+  userId          String
+  githubAccountId String
+  tokenHash       String        @unique
+  csrfToken       String
+  expiresAt       DateTime
+  createdAt       DateTime      @default(now())
+  lastSeenAt      DateTime      @default(now())
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  githubAccount   GitHubAccount @relation(fields: [githubAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([githubAccountId])
+  @@index([expiresAt])
+}
+
+model ChatSession {
+  id                 String              @id @default(uuid())
+  sdkSessionId       String              @unique
+  userId             String
+  githubAccountId    String
+  repositoryId       String
+  repositoryName     String
+  title              String              @default("New chat")
+  model              String              @default("auto")
+  approvalMode       String              @default("INTERACTIVE")
+  approvalScopes     Json                @default("[]")
+  status             String              @default("IDLE")
+  branch             String?
+  headSha            String?
+  dirty              Boolean             @default(false)
+  skillManifest      Json?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  githubAccount      GitHubAccount        @relation(fields: [githubAccountId], references: [id], onDelete: Restrict)
+  turns              Turn[]
+  messages           Message[]
+  events             SessionEvent[]
+  permissionRequests PermissionRequest[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model Turn {
+  id             String              @id @default(uuid())
+  sessionId      String
+  idempotencyKey String
+  status         String              @default("QUEUED")
+  error          String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime            @default(now())
+  session        ChatSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  messages       Message[]
+  events         SessionEvent[]
+  permissions    PermissionRequest[]
+
+  @@unique([sessionId, idempotencyKey])
+  @@index([sessionId, createdAt])
+}
+
+model Message {
+  id        String      @id @default(uuid())
+  sessionId String
+  turnId    String?
+  role      String
+  content   String
+  metadata  Json?
+  createdAt DateTime    @default(now())
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turn      Turn?       @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+}
+
+model SessionEvent {
+  cursor    Int         @id @default(autoincrement())
+  sessionId String
+  turnId    String?
+  kind      String
+  data      Json
+  createdAt DateTime    @default(now())
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turn      Turn?       @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, cursor])
+}
+
+model PermissionRequest {
+  id           String      @id @default(uuid())
+  sdkRequestId String
+  sessionId    String
+  turnId       String
+  scope        String
+  intention    String
+  display      String
+  payload      Json
+  status       String      @default("PENDING")
+  expiresAt    DateTime
+  decidedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  session      ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turn         Turn        @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sdkRequestId])
+  @@index([sessionId, status])
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    String?
+  action    String
+  targetId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+}

@@ -16,7 +16,7 @@ import {
   updateSessionSchema,
   type ApprovalMode
 } from "@app/contracts";
-import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, type ChatSession as DbChatSession } from "@app/db";
+import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, databaseMode, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
 import { RepositoryRegistry, getGitInfo, scanSkills } from "@app/repository-tools";
 import { authenticate, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
@@ -100,7 +100,7 @@ app.get("/health/live", async () => ({ status: "ok" }));
 app.get("/health/ready", async (_request, reply) => {
   try {
     await Promise.all([db.$queryRaw`SELECT 1`, redis.ping()]);
-    return { status: "ready" };
+    return { status: "ready", databaseMode };
   } catch {
     return reply.code(503).send({ status: "not-ready" });
   }
@@ -365,7 +365,7 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
     Connection: "keep-alive",
     "X-Accel-Buffering": "no"
   });
-  const backlog = await db.sessionEvent.findMany({ where: { sessionId: session.id, cursor: { gt: after } }, orderBy: { cursor: "asc" }, take: 2_000 });
+  const backlog = await db.sessionEvent.findMany({ where: { sessionId: session.id, cursor: { gt: toDatabaseCursor(after) } }, orderBy: { cursor: "asc" }, take: 2_000 });
   for (const event of backlog) write({ cursor: Number(event.cursor), kind: event.kind, sessionId: event.sessionId, turnId: event.turnId, data: event.data, createdAt: event.createdAt.toISOString() });
   replaying = false;
   buffered.sort((left, right) => left.cursor - right.cursor).forEach(write);

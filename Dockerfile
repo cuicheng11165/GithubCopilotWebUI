@@ -8,7 +8,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json vitest.c
 COPY apps ./apps
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @app/db prisma generate
+RUN pnpm db:generate
 RUN pnpm build
 
 FROM node:24-bookworm-slim AS runtime-base
