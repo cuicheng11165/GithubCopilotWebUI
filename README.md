@@ -117,6 +117,10 @@ pnpm start:local
 
 Open `http://localhost:3000`. The production starter launches Web, API, Worker, and Local Execution Runner together and stops the whole group if one component exits. Internal control endpoints bind to loopback and require independent bearer tokens.
 
+### macOS
+
+Use Node.js 22 or newer with Git and ripgrep installed through Homebrew. Apple Silicon installations should use arm64-native Node.js and avoid sharing `node_modules` with Rosetta terminals. For production startup, explicit `launchd` PATH configuration, macOS privacy permissions, backups, HTTPS proxying, and troubleshooting, see the [macOS deployment guide](./docs/macos-deployment.md).
+
 ### Windows
 
 Use 64-bit Node.js 22 or newer, Git for Windows, and ripgrep from PowerShell. Repository paths may use forward slashes:
