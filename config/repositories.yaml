@@ -1,5 +1,5 @@
 repositories:
   - id: integration-test
-    displayName: Integration Test
-    path: C:/Drive/Trunk/integration-test
+    displayName: CopilotDeck
+    path: /Users/cuicheng/Documents/Github/CopilotDeck
     enabled: true
