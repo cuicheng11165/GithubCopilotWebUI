@@ -1,6 +1,6 @@
-# CopilotDeck
+# GithubCopilotWebUI
 
-CopilotDeck is a locally deployed, multi-user Web UI for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured repositories, with per-user GitHub identity, multiple Sessions, streaming responses, and approved command, URL, and private-script execution.
+GithubCopilotWebUI is a locally deployed, multi-user Web UI for GitHub Copilot Agent. It provides ChatGPT-style conversations over administrator-configured repositories, with per-user GitHub identity, multiple Sessions, streaming responses, and approved command, URL, and private-script execution.
 
 ## Features
 
@@ -21,9 +21,9 @@ Browser -> Next.js -> Fastify API -> SQLite
                                              -> Local Execution Runner
 ```
 
-The Worker starts the Copilot runtime in `mode: "empty"` and exposes only the application tools. SDK write/edit tools are rejected. Approved shell commands and private scripts run directly as the operating-system user that started CopilotDeck.
+The Worker starts the Copilot runtime in `mode: "empty"` and exposes only the application tools. SDK write/edit tools are rejected. Approved shell commands and private scripts run directly as the operating-system user that started GithubCopilotWebUI.
 
-CopilotDeck is designed for one installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal replicas and network-mounted SQLite files are not.
+GithubCopilotWebUI is designed for one installation and one Worker process on a single machine. Multiple authenticated users and concurrent Sessions are supported, but horizontal replicas and network-mounted SQLite files are not.
 
 ## Prerequisites
 
@@ -76,6 +76,8 @@ Set the GitHub App values, generate independent service secrets, and configure e
 
 ```dotenv
 DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
+LOG_LEVEL=info
+LOG_DIR=./data/logs
 LOCAL_SANDBOX_TMP_ROOT=./data/local-sandbox
 WORKER_CONTROL_URL=http://127.0.0.1:4200
 WORKER_CONTROL_HOST=127.0.0.1
@@ -85,6 +87,18 @@ WORKER_POLL_INTERVAL_MS=200
 EVENT_POLL_INTERVAL_MS=200
 WORKER_CONCURRENCY=2
 ```
+
+API and Worker session logs are written as JSON text lines to
+`LOG_DIR/users/<userId>/sessions/<sessionId>/api.log` and `worker.log` while
+continuing to appear in the console. Startup and other logs without a session
+context are written under the user's `system` folder, or under `LOG_DIR/system`
+when no user is known. `LOG_LEVEL` controls the minimum level. Relative
+`LOG_DIR` values are resolved from the repository root.
+
+Each session's API log includes complete user inputs as `user.message` events,
+and its Worker log includes complete Agent responses as `agent.message` events.
+Streaming response fragments are not logged separately. Log timestamps use the
+ISO 8601 UTC format (for example, `2026-07-23T05:30:12.345Z`).
 
 Development:
 
@@ -102,6 +116,10 @@ pnpm start:local
 ```
 
 Open `http://localhost:3000`. The production starter launches Web, API, Worker, and Local Execution Runner together and stops the whole group if one component exits. Internal control endpoints bind to loopback and require independent bearer tokens.
+
+### macOS
+
+Use Node.js 22 or newer with Git and ripgrep installed through Homebrew. Apple Silicon installations should use arm64-native Node.js and avoid sharing `node_modules` with Rosetta terminals. For production startup, explicit `launchd` PATH configuration, macOS privacy permissions, backups, HTTPS proxying, and troubleshooting, see the [macOS deployment guide](./docs/macos-deployment.md).
 
 ### Windows
 
@@ -134,6 +152,6 @@ The Copilot SDK is pinned to `1.0.7`; upgrade it intentionally and rerun the com
 
 ## Security warning
 
-There is no operating-system isolation boundary. Approved commands and private scripts can modify the selected repository, read any file available to the CopilotDeck process, start other processes, and use the host network. Approval modes control whether execution may begin; they cannot constrain a process after it starts.
+There is no operating-system isolation boundary. Approved commands and private scripts can modify the selected repository, read any file available to the GithubCopilotWebUI process, start other processes, and use the host network. Approval modes control whether execution may begin; they cannot constrain a process after it starts.
 
-Run CopilotDeck with a dedicated low-privilege account, register only trusted repositories, keep internal ports on loopback, and do not expose the application to untrusted users. See [SECURITY.md](./SECURITY.md).
+Run GithubCopilotWebUI with a dedicated low-privilege account, register only trusted repositories, keep internal ports on loopback, and do not expose the application to untrusted users. See [SECURITY.md](./SECURITY.md).

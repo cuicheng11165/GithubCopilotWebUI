@@ -12,6 +12,7 @@
   "dependencies": {
     "@app/contracts": "workspace:*",
     "@app/db": "workspace:*",
+    "@app/logging": "workspace:*",
     "@app/repository-tools": "workspace:*",
     "@github/copilot-sdk": "1.0.7",
     "zod": "3.25.64"

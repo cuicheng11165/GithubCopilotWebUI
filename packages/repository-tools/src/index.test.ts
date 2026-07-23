@@ -25,8 +25,8 @@ describe("repository tools", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
     const outside = await mkdtemp(path.join(os.tmpdir(), "repo-outside-"));
     await writeFile(path.join(outside, "secret.txt"), "secret");
-    await symlink(path.join(outside, "secret.txt"), path.join(root, "escape.txt"));
+    await symlink(outside, path.join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
     const repository: RepositoryConfig = { id: "test", displayName: "Test", path: root, canonicalPath: root, enabled: true };
-    await expect(readRepositoryFile(repository, "escape.txt")).rejects.toThrow("escapes");
+    await expect(readRepositoryFile(repository, "escape/secret.txt")).rejects.toThrow("escapes");
   });
 });

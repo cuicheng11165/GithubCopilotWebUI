@@ -9,6 +9,7 @@ import {
   type ApprovalScope
 } from "@app/contracts";
 import { ApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db } from "@app/db";
+import { createServiceLogger } from "@app/logging";
 import {
   RepositoryRegistry,
   getGitInfo,
@@ -19,6 +20,7 @@ import {
   searchRepository,
   type RepositoryConfig
 } from "@app/repository-tools";
+import { lastAssistantContent } from "./assistant-response.js";
 import { z } from "zod";
 
 const env = z.object({
@@ -34,9 +36,11 @@ const env = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(8),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300)
 }).parse(process.env);
+const logger = createServiceLogger({ service: "worker" });
+logger.info({ timestampFormat: "ISO 8601 UTC" }, "Worker session-routed text logging ready");
 const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
 await registry.load();
-registry.watch((error) => console.error("Repository config reload failed", error));
+registry.watch((error) => logger.error(error, "Repository config reload failed"));
 const copilotRuntimeEnv = {
   PATH: process.env.PATH ?? (process.platform === "win32" ? "C:\\Windows\\System32;C:\\Windows" : "/usr/local/bin:/usr/bin:/bin"),
   HOME: env.COPILOT_HOME,
@@ -277,8 +281,11 @@ async function runTurn(job: TurnJobLike) {
   if (!locked) throw new Error("Session is already processing another turn");
   sessionLocks.add(job.data.sessionId);
   let sdkSession: CopilotSession | undefined;
+  let turnLogger = logger.child({ sessionId: job.data.sessionId });
   try {
     const turn = await db.turn.findUniqueOrThrow({ where: { id: job.data.turnId }, include: { session: { include: { githubAccount: true } }, messages: { where: { role: MessageRole.USER }, orderBy: { createdAt: "asc" }, take: 1 } } });
+    turnLogger = logger.child({ userId: turn.session.userId, sessionId: turn.session.id, turnId: turn.id });
+    turnLogger.info("Turn processing started");
     if (turn.status === TurnStatus.STOPPED) return;
     const repository = registry.get(turn.session.repositoryId);
     const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
@@ -311,35 +318,35 @@ async function runTurn(job: TurnJobLike) {
     const metadata = await client.getSessionMetadata(turn.session.sdkSessionId);
     sdkSession = metadata ? await client.resumeSession(turn.session.sdkSessionId, sessionOptions) : await client.createSession({ ...sessionOptions, sessionId: turn.session.sdkSessionId });
     activeSessions.set(turn.session.id, { session: sdkSession, turnId: turn.id });
-    let assistantSaved = false;
+    const eventOffset = (await sdkSession.getEvents()).length;
+    let latestAssistantContent: string | undefined;
     sdkSession.on((rawEvent) => {
       const event = rawEvent as unknown as { type: string; data: Record<string, unknown> };
+      if (event.type === "assistant.message") {
+        latestAssistantContent = String(event.data.content ?? "");
+        return;
+      }
       void (async () => {
         if (event.type === "assistant.message_delta") await appendEvent(turn.session.id, turn.id, "assistant.delta", { deltaContent: String(event.data.deltaContent ?? "") });
-        else if (event.type === "assistant.message" && !assistantSaved) {
-          assistantSaved = true;
-          const content = String(event.data.content ?? "");
-          await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.ASSISTANT, content } });
-          await appendEvent(turn.session.id, turn.id, "assistant.message", { content });
-        } else if (event.type === "tool.execution_start") await appendEvent(turn.session.id, turn.id, "tool.started", event.data);
+        else if (event.type === "tool.execution_start") await appendEvent(turn.session.id, turn.id, "tool.started", event.data);
         else if (event.type === "tool.execution_complete") {
           const content = JSON.stringify(event.data, null, 2);
           const message = await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.TOOL, content, metadata: { eventType: event.type } } });
           await appendEvent(turn.session.id, turn.id, "tool.completed", { ...event.data, messageId: message.id, content });
         }
         else if (event.type === "session.error") await appendEvent(turn.session.id, turn.id, "turn.failed", event.data);
-      })().catch((error) => console.error("Failed to persist SDK event", error));
+      })().catch((error) => turnLogger.error(error, "Failed to persist SDK event"));
     });
     const prompt = turn.messages[0]?.content;
     if (!prompt) throw new Error("Turn has no user message");
     await sdkSession.sendAndWait({ prompt }, 15 * 60 * 1000);
-    if (!assistantSaved) {
-      const events = await sdkSession.getEvents();
-      const final = [...events].reverse().find((event) => event.type === "assistant.message") as unknown as { data?: { content?: string } } | undefined;
-      if (final?.data?.content) {
-        await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.ASSISTANT, content: final.data.content } });
-        await appendEvent(turn.session.id, turn.id, "assistant.message", { content: final.data.content });
-      }
+    const events = await sdkSession.getEvents();
+    const currentTurnEvents = events.slice(eventOffset);
+    const content = lastAssistantContent(currentTurnEvents as unknown as Array<{ type: string; data?: { content?: unknown } }>) ?? latestAssistantContent;
+    if (content !== undefined) {
+      turnLogger.info({ event: "agent.message", content }, "Agent message completed");
+      await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.ASSISTANT, content } });
+      await appendEvent(turn.session.id, turn.id, "assistant.message", { content });
     }
     const latestTurn = await db.turn.findUnique({ where: { id: turn.id }, select: { status: true } });
     if (latestTurn?.status === TurnStatus.STOPPED) {
@@ -353,6 +360,7 @@ async function runTurn(job: TurnJobLike) {
       db.chatSession.update({ where: { id: turn.session.id }, data: { status: nextQueued ? SessionStatus.QUEUED : SessionStatus.IDLE, ...titleUpdate } })
     ]);
     await appendEvent(turn.session.id, turn.id, "turn.completed", { title: titleUpdate.title ?? turn.session.title });
+    turnLogger.info("Turn processing completed");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown worker error";
     const stopped = stopRequested.has(job.data.sessionId) || message.toLowerCase().includes("abort");
@@ -361,6 +369,8 @@ async function runTurn(job: TurnJobLike) {
       db.chatSession.update({ where: { id: job.data.sessionId }, data: { status: stopped ? SessionStatus.IDLE : SessionStatus.ERROR } })
     ]);
     await appendEvent(job.data.sessionId, job.data.turnId, stopped ? "turn.stopped" : "turn.failed", { error: message });
+    if (stopped) turnLogger.info({ error: message }, "Turn processing stopped");
+    else turnLogger.error(error, "Turn processing failed");
     if (!stopped) throw error;
   } finally {
     activeSessions.delete(job.data.sessionId);
@@ -468,7 +478,7 @@ async function pollTurns() {
       if (claimed.count === 0) continue;
       reservedSessions.add(turn.sessionId);
       const execution = runTurn({ data: { sessionId: turn.sessionId, turnId: turn.id } })
-        .catch((error) => console.error("Turn failed", error))
+        .catch(() => undefined)
         .finally(() => executions.delete(execution));
       executions.add(execution);
     }
@@ -527,11 +537,11 @@ await new Promise<void>((resolve, reject) => {
   controlServer.once("error", reject);
   controlServer.listen(env.WORKER_CONTROL_PORT, env.WORKER_CONTROL_HOST, resolve);
 });
-console.log(`Worker control listening on http://${env.WORKER_CONTROL_HOST}:${env.WORKER_CONTROL_PORT}`);
+logger.info({ host: env.WORKER_CONTROL_HOST, port: env.WORKER_CONTROL_PORT }, "Worker control listening");
 await recoverWork();
 await pollTurns();
-schedulerTimer = setInterval(() => void pollTurns().catch((error) => console.error("Worker scheduler failed", error)), env.WORKER_POLL_INTERVAL_MS);
-cancellationTimer = setInterval(() => void pollCancellations().catch((error) => console.error("Worker cancellation poll failed", error)), env.WORKER_POLL_INTERVAL_MS);
+schedulerTimer = setInterval(() => void pollTurns().catch((error) => logger.error(error, "Worker scheduler failed")), env.WORKER_POLL_INTERVAL_MS);
+cancellationTimer = setInterval(() => void pollCancellations().catch((error) => logger.error(error, "Worker cancellation poll failed")), env.WORKER_POLL_INTERVAL_MS);
 
 async function shutdown() {
   shuttingDown = true;

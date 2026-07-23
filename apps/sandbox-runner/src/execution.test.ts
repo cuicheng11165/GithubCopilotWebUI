@@ -32,7 +32,9 @@ describe("ExecutionManager", () => {
 
     const result = await manager.execute({
       sessionId: "11111111-1111-4111-8111-111111111111",
-      command: "node -e \"console.log(process.cwd()); console.log(process.env.HOME)\"",
+      command: "Inspect execution environment",
+      executable: process.execPath,
+      args: ["-e", "console.log(process.cwd()); console.log(process.env.HOME)"],
       repositoryPath,
       tempRoot,
       timeoutSeconds: 2,
@@ -54,7 +56,9 @@ describe("ExecutionManager", () => {
 
     const truncated = await manager.execute({
       sessionId: "22222222-2222-4222-8222-222222222222",
-      command: "node -e \"process.stdout.write('1234567890')\"",
+      command: "Produce output beyond the limit",
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write('1234567890')"],
       repositoryPath,
       tempRoot,
       timeoutSeconds: 2,
@@ -62,7 +66,9 @@ describe("ExecutionManager", () => {
     });
     const combined = await manager.execute({
       sessionId: "66666666-6666-4666-8666-666666666666",
-      command: "node -e \"process.stdout.write('1234'); process.stderr.write('5678')\"",
+      command: "Produce combined output beyond the limit",
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write('1234'); process.stderr.write('5678')"],
       repositoryPath,
       tempRoot,
       timeoutSeconds: 2,
@@ -70,7 +76,9 @@ describe("ExecutionManager", () => {
     });
     const timedOut = await manager.execute({
       sessionId: "33333333-3333-4333-8333-333333333333",
-      command: "node -e \"setTimeout(() => {}, 5000)\"",
+      command: "Run beyond the timeout",
+      executable: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 5000)"],
       repositoryPath,
       tempRoot,
       timeoutSeconds: 0.05,

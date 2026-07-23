@@ -69,12 +69,18 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     if (response.ok) await request.server.ephemeral.set(validationKey, "1", 300);
   }
   void db.webSession.update({ where: { id: webSession.id }, data: { lastSeenAt: new Date() } });
+  request.log = request.log.child({ userId: webSession.user.id });
   return {
     webSession,
     user: webSession.user,
     account,
     githubToken
   };
+}
+
+export function bindSessionLog(request: FastifyRequest, userId: string, sessionId: string): void {
+  request.log = request.log.child({ userId, sessionId });
+  request.log.info({ method: request.method, url: request.url }, "Session request");
 }
 
 export async function ownedSession(userId: string, sessionId: string): Promise<ChatSession | null> {

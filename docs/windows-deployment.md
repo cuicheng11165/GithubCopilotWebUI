@@ -1,6 +1,6 @@
 # Windows 本机部署
 
-CopilotDeck 在 Windows 上以本机 Node.js 进程运行，使用 SQLite 保存数据。命令和私有脚本直接以启动 CopilotDeck 的 Windows 账户身份执行，不提供操作系统级隔离。
+GithubCopilotWebUI 在 Windows 上以本机 Node.js 进程运行，使用 SQLite 保存数据。命令和私有脚本直接以启动 GithubCopilotWebUI 的 Windows 账户身份执行，不提供操作系统级隔离。
 
 ## 1. 环境要求
 
@@ -90,7 +90,7 @@ repositories:
 ## 4. 安装、迁移和构建
 
 ```powershell
-Set-Location C:\Apps\CopilotDeck
+Set-Location C:\Apps\GithubCopilotWebUI
 corepack pnpm install --frozen-lockfile
 corepack pnpm db:migrate
 corepack pnpm typecheck
@@ -134,7 +134,7 @@ Invoke-RestMethod http://localhost:4100/health/ready
 4. Arguments 填写：
 
    ```text
-   /d /c "corepack pnpm start:local >> data\copilotdeck.log 2>&1"
+   /d /c "corepack pnpm start:local >> data\github-copilot-web-ui.log 2>&1"
    ```
 
 5. Start in 填写项目绝对路径。
@@ -155,7 +155,7 @@ Invoke-RestMethod http://localhost:4100/health/ready
 升级流程：
 
 ```powershell
-Set-Location C:\Apps\CopilotDeck
+Set-Location C:\Apps\GithubCopilotWebUI
 git pull --ff-only
 corepack pnpm install --frozen-lockfile
 corepack pnpm db:migrate
@@ -171,7 +171,7 @@ corepack pnpm start:local
 
 ### Prisma 文件被占用或迁移失败
 
-停止所有 CopilotDeck Node 进程后再迁移。确认服务账户可以写入 `data` 目录，并检查杀毒软件是否锁定 SQLite 文件或 Prisma engine。
+停止所有 GithubCopilotWebUI Node 进程后再迁移。确认服务账户可以写入 `data` 目录，并检查杀毒软件是否锁定 SQLite 文件或 Prisma engine。
 
 ### 登录后提示无权限
 

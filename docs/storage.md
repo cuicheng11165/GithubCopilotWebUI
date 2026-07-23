@@ -1,6 +1,6 @@
 # Storage
 
-CopilotDeck uses SQLite as its only application database and coordination store.
+GithubCopilotWebUI uses SQLite as its only application database and coordination store.
 
 | Data | Location |
 | --- | --- |
@@ -41,4 +41,4 @@ data/copilot/
 
 SQLite may remove the `-wal` or `-shm` files when they are not needed. Their absence after a clean shutdown is normal. When services must remain online, use a SQLite-aware online backup tool instead of copying only the main database file.
 
-Restore the database files and Copilot state directory to their original paths, run `pnpm db:migrate`, and then start CopilotDeck.
+Restore the database files and Copilot state directory to their original paths, run `pnpm db:migrate`, and then start GithubCopilotWebUI.
