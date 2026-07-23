@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Github, LoaderCircle, LogOut, Menu, Pencil, Plus, Send, ShieldAlert, Square, Trash2, X } from "lucide-react";
+import { Bot, Github, LogOut, Menu, Pencil, Plus, Send, ShieldAlert, Square, Trash2, X } from "lucide-react";
 import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
 import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions } from "../lib/api";
+import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
 import { PermissionCard } from "./permission-card";
+import { ToolActivityGroup } from "./tool-activity-group";
 
 export function ChatApp() {
   const [me, setMe] = useState<AuthUser | null>(null);
@@ -21,11 +23,16 @@ export function ChatApp() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draft, setDraft] = useState("");
   const [streaming, setStreaming] = useState("");
-  const [activeTool, setActiveTool] = useState<string | null>(null);
+  const [activeTool, setActiveTool] = useState<{ name: string; turnId: string | null } | null>(null);
+  const [runningTurnId, setRunningTurnId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const active = useMemo(() => sessions.find((session) => session.id === activeId) ?? null, [sessions, activeId]);
+  const conversationItems = useMemo(() => groupConversationMessages(messages), [messages]);
+  const completedTurnIds = useMemo(() => new Set(messages.filter((message) => message.role === "assistant" && message.turnId).map((message) => message.turnId)), [messages]);
+  const activeToolTurnId = runningTurnId ?? activeTool?.turnId ?? null;
+  const hasActiveToolGroup = activeToolTurnId !== null && conversationItems.some((item) => item.kind === "tool-group" && item.turnId === activeToolTurnId);
 
   const refreshSessions = useCallback(async () => { const data = await getSessions(); setSessions(data); if (!activeId && data[0]) setActiveId(data[0].id); }, [activeId]);
   useEffect(() => { void (async () => {
@@ -38,8 +45,9 @@ export function ChatApp() {
   })(); }, []);
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setActiveTool(null); return; }
+    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setActiveTool(null); setRunningTurnId(null); return; }
     setStreaming("");
+    setActiveTool(null); setRunningTurnId(null);
     void getSession(activeId).then((detail) => { setMessages(detail.messages); setPermissions(detail.permissions); setSkills(detail.skills); }).catch((caught) => setError(caught instanceof Error ? caught.message : "Failed to load session"));
     const events = new EventSource(`/api/sessions/${activeId}/events`, { withCredentials: true });
     const handle = (raw: Event) => {
@@ -53,14 +61,21 @@ export function ChatApp() {
         const id = String(payload.data.messageId ?? crypto.randomUUID());
         const content = String(payload.data.content ?? JSON.stringify(payload.data, null, 2));
         setMessages((current) => current.some((message) => message.id === id) ? current : [...current, { id, sessionId: activeId, turnId: payload.turnId, role: "tool", content, createdAt: new Date().toISOString() }]);
-        setActiveTool(null);
+        setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
       }
-      if (payload.kind === "tool.started") setActiveTool(String(payload.data.toolName ?? payload.data.name ?? "Agent tool"));
+      if (payload.kind === "tool.started") setActiveTool({ name: String(payload.data.toolName ?? payload.data.name ?? "Agent tool"), turnId: payload.turnId });
       if (payload.kind === "permission.requested") setPermissions((current) => [...current.filter((item) => item.id !== payload.data.id), payload.data as unknown as PermissionRequest]);
       if (payload.kind === "permission.completed") setPermissions((current) => current.filter((item) => item.id !== payload.data.requestId));
       if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
-      if (payload.kind === "turn.started") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
+      if (payload.kind === "turn.started") {
+        setRunningTurnId(payload.turnId);
+        setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
+      }
       if (payload.kind === "permission.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
+      if (["turn.completed", "turn.failed", "turn.stopped"].includes(payload.kind)) {
+        setRunningTurnId((current) => current === payload.turnId ? null : current);
+        setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
+      }
       if (["turn.completed", "turn.failed", "turn.stopped", "session.updated"].includes(payload.kind)) void refreshSessions();
     };
     ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "turn.completed", "turn.failed", "turn.stopped", "session.updated"].forEach((kind) => events.addEventListener(kind, handle));
@@ -68,7 +83,7 @@ export function ChatApp() {
   }, [activeId, refreshSessions]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streaming, permissions]);
+  }, [messages, streaming, permissions, activeTool]);
 
   if (!me) return <div className="app-loading"><div className="brand-mark"><Bot size={24} /></div><span>Loading workspace…</span></div>;
 
@@ -115,7 +130,11 @@ export function ChatApp() {
       {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run approved commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
         {active.approvalMode === "allow-all" && <div className="allow-all-banner"><ShieldAlert size={15} /> Allow all is active. Commands, public URL requests, and private scripts run without approval.</div>}
         {active.approvalMode === "session-scoped" && <div className="session-scope-bar"><span>Auto approve for this session:</span>{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={active.approvalScopes.includes(scope)} onChange={() => void updateSession(active, { approvalScopes: active.approvalScopes.includes(scope) ? active.approvalScopes.filter((item) => item !== scope) : [...active.approvalScopes, scope] })} />{scope === "private-script" ? "Private scripts" : scope === "url" ? "URL" : "Shell"}</label>)}</div>}
-        <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>{messages.map((message) => <Message key={message.id} message={message} />)}{streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streaming + " ▍", createdAt: new Date().toISOString() }} />}{activeTool && <div className="tool-running"><LoaderCircle size={15} /> Running {activeTool}…</div>}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
+        <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>{conversationItems.map((item) => item.kind === "message"
+          ? <Message key={item.key} message={item.message} />
+          : <ToolActivityGroup key={item.key} messages={item.messages} isRunning={item.turnId !== null && item.turnId === activeToolTurnId && !completedTurnIds.has(item.turnId)} runningTool={item.turnId === activeTool?.turnId ? activeTool.name : null} />)}
+          {activeToolTurnId !== null && !hasActiveToolGroup && !completedTurnIds.has(activeToolTurnId) && <ToolActivityGroup messages={[]} isRunning runningTool={activeTool?.name ?? null} />}
+          {streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streaming + " ▍", createdAt: new Date().toISOString() }} />}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
         <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${active.repositoryName}…`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>Local execution · repository may be modified</span>{["running", "queued", "waiting-approval"].includes(active.status) ? <button className="send-button stop" aria-label="Stop" onClick={() => void apiWrite(`/api/sessions/${active.id}/stop`, me.csrfToken, "POST")}><Square size={14} fill="currentColor" /></button> : <button className="send-button" aria-label="Send" disabled={!draft.trim()} onClick={() => void send()}><Send size={17} /></button>}</div></div><p className="composer-note">Copilot can make mistakes. Review command output and URL destinations.</p></div>
       </>}
     </section>
