@@ -20,7 +20,7 @@ DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
 
 SQLite runs in WAL mode with foreign keys enabled, one connection per process, and a ten-second busy timeout. The API and Worker share the same database file. Queued `Turn` rows are atomically claimed by the Worker; approval, cancellation, restart recovery, same-Session serialization, and replayable event delivery are all driven by database state.
 
-The default Worker concurrency is two. SQLite serializes writers, so increase concurrency only after measuring the actual workload. Run only one Worker process and do not place the database on NFS or another network filesystem.
+The default Worker concurrency is 20. SQLite serializes writers, so increase concurrency only after measuring the actual workload. Run only one Worker process and do not place the database on NFS or another network filesystem.
 
 Create or update the database with:
 

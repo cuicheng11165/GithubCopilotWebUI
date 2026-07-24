@@ -33,7 +33,7 @@ const env = z.object({
   COPILOT_HOME: z.string().default("./data/copilot"),
   SANDBOX_RUNNER_URL: z.string().url().default("http://127.0.0.1:4100"),
   SANDBOX_RUNNER_TOKEN: z.string().min(32),
-  WORKER_CONCURRENCY: z.coerce.number().int().positive().default(8),
+  WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300)
 }).parse(process.env);
 const logger = createServiceLogger({ service: "worker" });

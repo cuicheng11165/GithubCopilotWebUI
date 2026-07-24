@@ -13,7 +13,7 @@ for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_RO
 }
 
 process.env.NODE_ENV = "production";
-process.env.WORKER_CONCURRENCY ??= "2";
+process.env.WORKER_CONCURRENCY ??= "20";
 process.env.API_INTERNAL_URL ??= "http://127.0.0.1:4000";
 
 const webBuild = path.join(root, "apps/web/.next");
