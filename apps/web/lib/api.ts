@@ -26,9 +26,12 @@ export async function apiWrite<T>(path: string, csrfToken: string, method: "POST
   const init: RequestInit = {
     method,
     credentials: "include",
-    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken, ...extraHeaders }
+    headers: { "X-CSRF-Token": csrfToken, ...extraHeaders }
   };
-  if (body !== undefined) init.body = JSON.stringify(body);
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json", ...init.headers };
+    init.body = JSON.stringify(body);
+  }
   return parse<T>(await fetch(path, init));
 }
 
