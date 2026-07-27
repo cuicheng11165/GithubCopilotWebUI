@@ -20,6 +20,7 @@ import {
   searchRepository,
   type RepositoryConfig
 } from "@app/repository-tools";
+import { sanitizeToolEventForLog } from "./tool-event-log.js";
 import { lastAssistantContent } from "./assistant-response.js";
 import { z } from "zod";
 
@@ -328,8 +329,12 @@ async function runTurn(job: TurnJobLike) {
       }
       void (async () => {
         if (event.type === "assistant.message_delta") await appendEvent(turn.session.id, turn.id, "assistant.delta", { deltaContent: String(event.data.deltaContent ?? "") });
-        else if (event.type === "tool.execution_start") await appendEvent(turn.session.id, turn.id, "tool.started", event.data);
+        else if (event.type === "tool.execution_start") {
+          turnLogger.info({ event: "tool.started", tool: sanitizeToolEventForLog(event.data) }, "Tool execution started");
+          await appendEvent(turn.session.id, turn.id, "tool.started", event.data);
+        }
         else if (event.type === "tool.execution_complete") {
+          turnLogger.info({ event: "tool.completed", tool: sanitizeToolEventForLog(event.data) }, "Tool execution completed");
           const content = JSON.stringify(event.data, null, 2);
           const message = await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.TOOL, content, metadata: { eventType: event.type } } });
           await appendEvent(turn.session.id, turn.id, "tool.completed", { ...event.data, messageId: message.id, content });
