@@ -66,12 +66,23 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 
 ### 执行审批
 
-项目内置三类需要审批的执行能力：
+项目默认向 Agent 提供以下核心工具：
+
+| 类型 | 工具 | 说明 |
+| --- | --- | --- |
+| 仓库读取 | `repo_tree`、`view`、`rg`、`glob`、`repo_git_info` | 查看目录与带行号文件内容、搜索文本和文件、读取 Git 摘要。 |
+| 受控编辑 | `apply_patch` | 校验并应用 unified git diff。 |
+| 命令执行 | `bash`、`read_bash`、`stop_bash`、`list_bash` | 启动、读取、停止和列出会话内的命令。 |
+| 验证 | `problems`、`runTests`、`testFailure` | 自动识别标准诊断与测试任务，并读取失败输出。 |
+| 网络 | `web_fetch` | 通过受控网络边界抓取公开 HTTP/HTTPS URL。 |
+| 私有技能 | `run_private_script` | 执行仓库或私有 Skill 中的脚本。 |
+
+仓库读取、命令状态读取和停止工具不需要额外审批。以下三类能力需要审批：
 
 | 范围 | 工具 | 说明 |
 | --- | --- | --- |
-| `shell` | `execute_shell` | 在所选仓库上下文中执行本机 shell 命令。 |
-| `url` | `fetch_url` | 通过受控网络边界抓取公开 HTTP/HTTPS URL。 |
+| `shell` | `bash`、`apply_patch`、`problems`、`runTests` | 执行命令、修改仓库或运行标准验证任务。 |
+| `url` | `web_fetch` | 通过受控网络边界抓取公开 HTTP/HTTPS URL。 |
 | `private-script` | `run_private_script` | 运行仓库或私有技能中的脚本，支持 direct、shell、node、python 等解释器模式。 |
 
 会话支持三种审批模式：
@@ -334,12 +345,23 @@ GithubCopilotWebUI is designed to provide a unified Copilot Agent entry point fo
 
 ### Execution Approval
 
-The project includes three approval-gated execution capabilities:
+The project exposes this default core tool set to the Agent:
+
+| Category | Tools | Description |
+| --- | --- | --- |
+| Repository reads | `repo_tree`, `view`, `rg`, `glob`, `repo_git_info` | Inspect trees and numbered file ranges, search text and filenames, and read a Git summary. |
+| Controlled edits | `apply_patch` | Validate and apply a unified git diff. |
+| Command lifecycle | `bash`, `read_bash`, `stop_bash`, `list_bash` | Start, inspect, stop, and list commands within the current Session. |
+| Validation | `problems`, `runTests`, `testFailure` | Detect standard diagnostics and test tasks and inspect failure output. |
+| Network | `web_fetch` | Fetch a public HTTP/HTTPS URL through the controlled network boundary. |
+| Private skills | `run_private_script` | Run a repository or private-skill script. |
+
+Repository reads and command status/stop operations do not require approval. The following capability groups remain approval-gated:
 
 | Scope | Tool | Description |
 | --- | --- | --- |
-| `shell` | `execute_shell` | Run a local shell command in the selected repository context. |
-| `url` | `fetch_url` | Fetch public HTTP/HTTPS URLs through a controlled network boundary. |
+| `shell` | `bash`, `apply_patch`, `problems`, `runTests` | Run commands, modify repository files, or execute standard validation tasks. |
+| `url` | `web_fetch` | Fetch public HTTP/HTTPS URLs through a controlled network boundary. |
 | `private-script` | `run_private_script` | Run repository or private-skill scripts, including direct, shell, node, and python interpreter modes. |
 
 Sessions support three approval modes:
@@ -504,7 +526,7 @@ Main responsibilities:
 
 ### Execution Approval
 
-1. The Agent requests a shell, URL, or private-script tool.
+1. The Agent requests an approval-gated shell, patch, validation, URL, or private-script tool.
 2. The Worker checks whether the session approval mode allows automatic approval.
 3. If manual confirmation is required, the Worker creates a `PermissionRequest` and sets the session state to `waiting-approval`.
 4. Web displays an approval card.
@@ -531,6 +553,6 @@ docs/               Supplemental API, storage, and platform documentation
 
 ## Security Boundary
 
-GithubCopilotWebUI is not a strong sandbox system. Although the project restricts the Agent's default tools and uses approval mechanisms for shell, URL, and private-script execution, any approved process still runs as the operating-system user that started the service. It may modify repositories, read files available to that user, start other processes, or access the network.
+GithubCopilotWebUI is not a strong sandbox system. Although the project restricts the Agent's default tools and uses approval mechanisms for shell, patch, validation, URL, and private-script execution, any approved process still runs as the operating-system user that started the service. It may modify repositories, read files available to that user, start other processes, or access the network.
 
 Only register trusted repositories, only expose the project to trusted users, and run it with a low-privilege system account. See `SECURITY.md` for more complete security guidance.

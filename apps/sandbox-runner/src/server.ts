@@ -3,6 +3,7 @@ import { z } from "zod";
 import { RepositoryRegistry } from "@app/repository-tools";
 import { ExecutionManager } from "./execution.js";
 import { requestPublicUrl } from "./network.js";
+import { applyRepositoryPatch } from "./patch.js";
 
 const env = z.object({
   SANDBOX_RUNNER_HOST: z.string().default("127.0.0.1"),
@@ -50,6 +51,70 @@ app.post("/execute", async (request, reply) => {
     tempRoot: env.LOCAL_SANDBOX_TMP_ROOT,
     ...(parsed.data.executable ? { executable: parsed.data.executable, args: parsed.data.args ?? [] } : {})
   });
+});
+
+app.post("/bash", async (request, reply) => {
+  const parsed = executeSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid bash request" });
+  let repository;
+  try { repository = registry.get(parsed.data.repositoryId); } catch { return reply.code(404).send({ error: "Repository not found" }); }
+  return executions.start({
+    sessionId: parsed.data.sessionId,
+    command: parsed.data.command,
+    timeoutSeconds: parsed.data.timeoutSeconds ?? env.COMMAND_TIMEOUT_SECONDS,
+    maxOutputBytes: env.COMMAND_MAX_OUTPUT_BYTES,
+    repositoryPath: repository.canonicalPath,
+    tempRoot: env.LOCAL_SANDBOX_TMP_ROOT
+  });
+});
+
+const bashLookupSchema = z.object({
+  sessionId: z.string().uuid(),
+  bashId: z.string().uuid(),
+  tailLines: z.number().int().positive().max(5_000).optional()
+});
+
+app.post("/bash/read", async (request, reply) => {
+  const parsed = bashLookupSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid bash read request" });
+  try {
+    return executions.read(parsed.data.sessionId, parsed.data.bashId, parsed.data.tailLines);
+  } catch (error) {
+    return reply.code(404).send({ error: error instanceof Error ? error.message : "Bash execution not found" });
+  }
+});
+
+app.post("/bash/list", async (request, reply) => {
+  const parsed = z.object({ sessionId: z.string().uuid() }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid bash list request" });
+  return executions.list(parsed.data.sessionId);
+});
+
+app.post("/bash/stop", async (request, reply) => {
+  const parsed = bashLookupSchema.omit({ tailLines: true }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid bash stop request" });
+  try {
+    return await executions.stopOne(parsed.data.sessionId, parsed.data.bashId);
+  } catch (error) {
+    return reply.code(404).send({ error: error instanceof Error ? error.message : "Bash execution not found" });
+  }
+});
+
+const patchSchema = z.object({
+  repositoryId: z.string(),
+  patch: z.string().min(1).max(512_000)
+});
+
+app.post("/apply-patch", async (request, reply) => {
+  const parsed = patchSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid patch request" });
+  let repository;
+  try { repository = registry.get(parsed.data.repositoryId); } catch { return reply.code(404).send({ error: "Repository not found" }); }
+  try {
+    return await applyRepositoryPatch(repository.canonicalPath, parsed.data.patch);
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : "Patch could not be applied" });
+  }
 });
 
 app.post<{ Params: { sessionId: string } }>("/sessions/:sessionId/stop", async (request) => {

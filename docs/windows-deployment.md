@@ -7,7 +7,8 @@ GithubCopilotWebUI 在 Windows 上以本机 Node.js 进程运行，使用 SQLite
 - 64 位 Node.js 22 或更高版本。
 - Corepack 和 pnpm 11。
 - Git for Windows。
-- ripgrep (`rg`)。
+- ripgrep (`rg`) 可选；安装后搜索性能更好，未安装时自动使用 Node.js 回退实现。
+- 使用 Python 工具时，需要 Python 3 的 `python.exe` 或 Windows `py.exe` launcher 位于 `PATH`。
 - 能访问 GitHub.com 或配置的 GitHub Enterprise Cloud。
 
 验证环境：
@@ -16,7 +17,8 @@ GithubCopilotWebUI 在 Windows 上以本机 Node.js 进程运行，使用 SQLite
 node --version
 corepack --version
 git --version
-rg --version
+Get-Command rg -ErrorAction SilentlyContinue
+Get-Command python,py -ErrorAction SilentlyContinue
 ```
 
 建议使用专门的低权限服务账户运行应用。该账户必须能够读取应用目录和已注册仓库，并能够写入 `data` 目录。若允许 Agent 修改仓库，还需要相应写入权限。
@@ -192,11 +194,13 @@ Get-NetTCPConnection -LocalPort 3000,4000,4100,4200 -ErrorAction SilentlyContinu
 
 ### Agent 命令语法错误
 
-普通 shell 命令由 `cmd.exe` 执行。标记为 `interpreter: shell` 的私有脚本由 Windows PowerShell 执行；Node 和 Python 脚本使用对应解释器直接运行。
+普通 shell 命令由 `cmd.exe` 执行。标记为 `interpreter: shell` 的私有脚本由 Windows PowerShell 执行；Node 脚本使用 Node.js 直接运行。Python 工具优先使用 `PATH` 中的 `python.exe`，找不到时自动尝试 `py -3`。
+
+每个命令使用独立的临时 `HOME`、`USERPROFILE`、`APPDATA` 和 `LOCALAPPDATA`，同时保留 Windows 启动程序所需的 `SystemRoot`、`ComSpec`、`PATHEXT` 和 Program Files 变量。
 
 ## 9. 上线检查清单
 
-- [ ] Node、Git 和 ripgrep 版本检查通过。
+- [ ] Node 和 Git 版本检查通过；若使用 Python 工具，`python` 或 `py -3` 可执行。
 - [ ] 四个服务密钥已替换，且未提交 `.env`。
 - [ ] GitHub App Callback URL 与 `PUBLIC_APP_URL` 匹配。
 - [ ] 组织或企业允许列表配置正确。

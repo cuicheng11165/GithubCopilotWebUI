@@ -53,6 +53,50 @@ async function sha256(value: string): Promise<string> {
   return createHash("sha256").update(value).digest("hex");
 }
 
+async function walkReadableFiles(repository: RepositoryConfig, maxFiles = 100_000): Promise<string[]> {
+  const results: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    if (results.length >= maxFiles) return;
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (results.length >= maxFiles) break;
+      if (EXCLUDED_SEGMENTS.has(entry.name) || entry.isSymbolicLink()) continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(absolute);
+      else if (entry.isFile()) results.push(path.relative(repository.canonicalPath, absolute).split(path.sep).join("/"));
+    }
+  }
+  await visit(repository.canonicalPath);
+  return results;
+}
+
+function ripgrepExcludes(): string[] {
+  return [...EXCLUDED_SEGMENTS].flatMap((segment) => ["--glob", `!${segment}/**`]);
+}
+
+async function runRipgrep(repository: RepositoryConfig, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("rg", args, {
+      cwd: repository.canonicalPath,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    child.stdout.on("data", (chunk: Buffer) => { if (stdout.length < 512_000) stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 8_000) stderr += chunk.toString(); });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
 export class RepositoryRegistry {
   private repositories = new Map<string, RepositoryConfig>();
   private watcher: FSWatcher | undefined;
@@ -204,6 +248,26 @@ export async function readRepositoryFile(repository: RepositoryConfig, requested
   return buffer.toString("utf8");
 }
 
+export async function viewRepositoryFile(
+  repository: RepositoryConfig,
+  requestedPath: string,
+  startLine = 1,
+  lineCount = 400
+): Promise<{ path: string; startLine: number; endLine: number; totalLines: number; content: string }> {
+  const content = await readRepositoryFile(repository, requestedPath);
+  const lines = content.split(/\r?\n/);
+  const normalizedStart = Math.max(1, startLine);
+  const normalizedCount = Math.max(1, Math.min(lineCount, 2_000));
+  const selected = lines.slice(normalizedStart - 1, normalizedStart - 1 + normalizedCount);
+  return {
+    path: requestedPath,
+    startLine: normalizedStart,
+    endLine: selected.length === 0 ? normalizedStart - 1 : normalizedStart + selected.length - 1,
+    totalLines: lines.length,
+    content: selected.map((line, index) => `${String(normalizedStart + index).padStart(6, " ")}\t${line}`).join("\n")
+  };
+}
+
 export async function listRepositoryTree(repository: RepositoryConfig, requestedPath = ".", depth = 2, maxEntries = 500): Promise<string[]> {
   const root = requestedPath === "." ? repository.canonicalPath : await resolveRepositoryPath(repository, requestedPath);
   const results: string[] = [];
@@ -225,23 +289,51 @@ export async function listRepositoryTree(repository: RepositoryConfig, requested
   return results;
 }
 
+export async function globRepositoryFiles(repository: RepositoryConfig, pattern: string, maxResults = 500): Promise<string[]> {
+  if (!pattern.trim()) throw new Error("Glob pattern is required");
+  try {
+    const result = await runRipgrep(repository, ["--files", "--hidden", ...ripgrepExcludes(), "--glob", pattern]);
+    if (result.code === 0 || result.code === 1) return result.stdout.split(/\r?\n/).filter(Boolean).slice(0, maxResults);
+    throw new Error(result.stderr || `rg exited with code ${result.code}`);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    const files = await walkReadableFiles(repository);
+    return files.filter((file) =>
+      path.matchesGlob(file, pattern) || (!pattern.includes("/") && path.matchesGlob(path.posix.basename(file), pattern))
+    ).slice(0, maxResults);
+  }
+}
+
 export async function searchRepository(repository: RepositoryConfig, query: string, maxResults = 100): Promise<string> {
   if (!query.trim()) throw new Error("Search query is required");
-  return new Promise((resolve, reject) => {
-    const child = spawn("rg", ["--line-number", "--column", "--no-heading", "--color", "never", "--max-count", String(maxResults), "--glob", "!.git/**", "--glob", "!node_modules/**", "--", query, "."], {
-      cwd: repository.canonicalPath,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let output = "";
-    let errorOutput = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    child.stdout.on("data", (chunk: Buffer) => { if (output.length < 512_000) output += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (errorOutput.length < 8_000) errorOutput += chunk.toString(); });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0 || code === 1) resolve(output.trim());
-      else reject(new Error(errorOutput || `rg exited with code ${code}`));
-    });
-  });
+  try {
+    const result = await runRipgrep(repository, ["--line-number", "--column", "--no-heading", "--color", "never", "--max-count", String(maxResults), ...ripgrepExcludes(), "--", query, "."]);
+    if (result.code === 0 || result.code === 1) return result.stdout.trim();
+    throw new Error(result.stderr || `rg exited with code ${result.code}`);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    let expression: RegExp;
+    try {
+      expression = new RegExp(query);
+    } catch {
+      throw new Error("Search query is not a valid regular expression");
+    }
+    const matches: string[] = [];
+    for (const file of await walkReadableFiles(repository)) {
+      if (matches.length >= maxResults) break;
+      const absolute = path.join(repository.canonicalPath, ...file.split("/"));
+      const fileStat = await stat(absolute);
+      if (fileStat.size > 2 * 1024 * 1024) continue;
+      const buffer = await readFile(absolute);
+      if (buffer.includes(0)) continue;
+      for (const [index, line] of buffer.toString("utf8").split(/\r?\n/).entries()) {
+        const match = expression.exec(line);
+        expression.lastIndex = 0;
+        if (!match) continue;
+        matches.push(`${file}:${index + 1}:${(match.index ?? 0) + 1}:${line}`);
+        if (matches.length >= maxResults) break;
+      }
+    }
+    return matches.join("\n");
+  }
 }

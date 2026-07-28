@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ExecutionManager, localShellCommand } from "./execution.js";
+import { ExecutionManager, localShellCommand, restrictedExecutionEnvironment } from "./execution.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -23,6 +23,19 @@ describe("ExecutionManager", () => {
       args: ["/d", "/s", "/c", "echo ok"]
     });
     expect(localShellCommand("echo ok", "linux", {})).toEqual({ executable: "/bin/sh", args: ["-lc", "echo ok"] });
+  });
+
+  it("provides isolated Windows user directories and required system variables", () => {
+    const environment = restrictedExecutionEnvironment("C:\\sandbox\\session", "win32", {
+      PATH: "C:\\tools",
+      SystemRoot: "C:\\Windows",
+      ProgramData: "C:\\ProgramData"
+    });
+    expect(environment.USERPROFILE).toBe("C:\\sandbox\\session");
+    expect(environment.APPDATA).toBe("C:\\sandbox\\session\\AppData\\Roaming");
+    expect(environment.LOCALAPPDATA).toBe("C:\\sandbox\\session\\AppData\\Local");
+    expect(environment.ComSpec).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(environment.ProgramData).toBe("C:\\ProgramData");
   });
 
   it("runs commands in the repository with a restricted environment", async () => {
@@ -134,5 +147,29 @@ describe("ExecutionManager", () => {
     const result = await execution;
     expect(result.signal === "SIGKILL" || result.exitCode !== 0).toBe(true);
     expect(result.timedOut).toBe(false);
+  });
+
+  it("tracks, reads, lists, and stops background bash executions", async () => {
+    const repositoryPath = await temporaryDirectory("copilotdeck-repository-");
+    const tempRoot = await temporaryDirectory("copilotdeck-execution-");
+    const manager = new ExecutionManager();
+    const sessionId = "77777777-7777-4777-8777-777777777777";
+    const started = await manager.start({
+      sessionId,
+      command: `${process.execPath} -e "console.log('ready'); setTimeout(() => {}, 5000)"`,
+      repositoryPath,
+      tempRoot,
+      timeoutSeconds: 10,
+      maxOutputBytes: 4096
+    }, 50);
+
+    expect(started.status).toBe("running");
+    expect(manager.list(sessionId)).toHaveLength(1);
+    const outputDeadline = Date.now() + 1_000;
+    while (!manager.read(sessionId, started.bashId).stdout.includes("ready") && Date.now() < outputDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(manager.read(sessionId, started.bashId).stdout).toContain("ready");
+    expect((await manager.stopOne(sessionId, started.bashId)).status).toBe("stopped");
   });
 });

@@ -8,20 +8,20 @@ GithubCopilotWebUI is a trusted-machine application without process or network i
 - Tokens, application secrets, and database credentials are not added to the environment passed to executed commands.
 - Session identifiers are not authorization. Every API operation checks the authenticated owner in SQLite.
 - The Copilot runtime uses `mode: "empty"`, receives a per-user GitHub token, and exposes only application-defined tools.
-- SDK write/edit tools and unexpected `write` permission requests are rejected.
+- SDK write/edit tools and unexpected `write` permission requests are rejected. Repository edits are available only through the custom `apply_patch` tool or an approved host command/private script.
 - The Local Execution Runner and Worker control endpoint bind to loopback by default and require independent bearer tokens.
 
 ## Repository access
 
-Repository read tools reject parent traversal, hidden build/dependency surfaces, and symlinks that escape the registered root. These restrictions do not apply to an approved shell command or private script: local processes receive the repository as their working directory and operate with the full permissions of the service account.
+Repository read tools reject parent traversal, hidden build/dependency surfaces, and symlinks that escape the registered root. `apply_patch` validates unified diffs with `git apply --check` before applying them and relies on Git's default unsafe-path rejection. These restrictions do not apply to an approved shell command or private script: local processes receive the repository as their working directory and operate with the full permissions of the service account.
 
 An enabled repository must therefore be considered entirely visible and writable by the Agent after execution is approved. Register only dedicated, reviewed repositories and do not include production credentials, private keys, or unrelated sensitive files.
 
 ## Execution approval
 
-- **Interactive:** every shell, URL, and private-script request waits for the Session owner.
+- **Interactive:** every shell, patch, diagnostics, test, URL, and private-script request waits for the Session owner.
 - **Session scoped:** selected capability groups are automatically approved for one Session.
-- **Allow all:** shell, URL, and private-script requests run without additional prompts.
+- **Allow all:** shell, patch, diagnostics, test, URL, and private-script requests run without additional prompts.
 
 Approval requests expire after five minutes and are denied on stop, logout, deletion, or Worker shutdown. Approval only decides whether execution starts; it is not a security boundary around the resulting process. `Allow all` should be reserved for fully trusted users and repositories.
 

@@ -12,16 +12,19 @@ import { ApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, Tur
 import { createServiceLogger } from "@app/logging";
 import {
   RepositoryRegistry,
+  globRepositoryFiles,
   getGitInfo,
   listRepositoryTree,
   readRepositoryFile,
   resolveRepositoryPath,
   scanSkills,
   searchRepository,
+  viewRepositoryFile,
   type RepositoryConfig
 } from "@app/repository-tools";
 import { sanitizeToolEventForLog } from "./tool-event-log.js";
 import { lastAssistantContent } from "./assistant-response.js";
+import { resolvePythonLauncher } from "./platform.js";
 import { z } from "zod";
 
 const env = z.object({
@@ -199,10 +202,21 @@ function permissionHandler(sessionId: string, turnId: string) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
     if (request.kind === "write") return { kind: "reject", feedback: "Repository writes are disabled by policy" };
     if (request.kind !== "custom-tool") return { kind: "reject", feedback: `Tool permission '${request.kind}' is not available` };
-    const scope: ApprovalScope | undefined = request.toolName === "execute_shell" ? "shell" : request.toolName === "fetch_url" ? "url" : request.toolName === "run_private_script" ? "private-script" : undefined;
+    const shellTools = new Set(["bash", "apply_patch", "problems", "runTests"]);
+    const scope: ApprovalScope | undefined = shellTools.has(request.toolName) ? "shell" : request.toolName === "web_fetch" ? "url" : request.toolName === "run_private_script" ? "private-script" : undefined;
     if (!scope) return { kind: "reject", feedback: "Unknown custom tool" };
     const args = request.args ?? {};
-    const display = request.toolName === "execute_shell" ? String(args.command ?? "") : request.toolName === "fetch_url" ? String(args.url ?? "") : String(args.script ?? "");
+    const display = request.toolName === "bash"
+      ? String(args.command ?? "")
+      : request.toolName === "web_fetch"
+        ? String(args.url ?? "")
+        : request.toolName === "apply_patch"
+          ? String(args.patch ?? "").slice(0, 8_000)
+          : request.toolName === "runTests"
+            ? "Run the repository test task"
+            : request.toolName === "problems"
+              ? "Run the repository diagnostics task"
+              : String(args.script ?? "");
     const intention = typeof args.intention === "string" ? args.intention : request.toolDescription;
     const approved = await waitForPermission(sessionId, turnId, scope, intention, display, args);
     return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this request" };
@@ -211,12 +225,61 @@ function permissionHandler(sessionId: string, turnId: string) {
 
 const rawSchemas = {
   tree: { type: "object", properties: { path: { type: "string" }, depth: { type: "integer", minimum: 0, maximum: 6 } }, additionalProperties: false },
-  read: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false },
+  view: { type: "object", properties: { path: { type: "string" }, startLine: { type: "integer", minimum: 1 }, lineCount: { type: "integer", minimum: 1, maximum: 2_000 } }, required: ["path"], additionalProperties: false },
   search: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
+  glob: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"], additionalProperties: false },
   shell: { type: "object", properties: { command: { type: "string" }, intention: { type: "string" } }, required: ["command", "intention"], additionalProperties: false },
+  bashLookup: { type: "object", properties: { bashId: { type: "string", format: "uuid" }, tailLines: { type: "integer", minimum: 1, maximum: 5_000 } }, required: ["bashId"], additionalProperties: false },
+  bashStop: { type: "object", properties: { bashId: { type: "string", format: "uuid" } }, required: ["bashId"], additionalProperties: false },
+  patch: { type: "object", properties: { patch: { type: "string" }, intention: { type: "string" } }, required: ["patch", "intention"], additionalProperties: false },
   url: { type: "object", properties: { url: { type: "string", format: "uri" }, intention: { type: "string" } }, required: ["url", "intention"], additionalProperties: false },
+  executionTask: { type: "object", properties: { intention: { type: "string" } }, required: ["intention"], additionalProperties: false },
   script: { type: "object", properties: { script: { type: "string" }, args: { type: "array", items: { type: "string" } }, interpreter: { type: "string", enum: ["direct", "shell", "node", "python"] }, intention: { type: "string" } }, required: ["script", "intention"], additionalProperties: false }
 } as const;
+
+async function detectRepositoryCommand(repository: RepositoryConfig, kind: "tests" | "problems"): Promise<string> {
+  try {
+    const packageJson = JSON.parse(await readRepositoryFile(repository, "package.json")) as {
+      packageManager?: string;
+      scripts?: Record<string, string>;
+    };
+    const script = kind === "tests"
+      ? (packageJson.scripts?.test ? "test" : undefined)
+      : (packageJson.scripts?.typecheck ? "typecheck" : packageJson.scripts?.lint ? "lint" : undefined);
+    if (script) {
+      const manager = packageJson.packageManager?.split("@")[0];
+      if (manager === "pnpm") return `corepack pnpm ${script}`;
+      if (manager === "yarn") return `corepack yarn ${script}`;
+      if (manager === "bun") return `bun run ${script}`;
+      return `npm run ${script}`;
+    }
+  } catch {
+    // Continue with non-Node project detection.
+  }
+  const python = await resolvePythonLauncher().catch(() => null);
+  const candidates: Array<[string, string | null]> = kind === "tests"
+    ? [
+        ["Cargo.toml", "cargo test"],
+        ["go.mod", "go test ./..."],
+        ["pyproject.toml", python ? `${python.shellPrefix} -m pytest` : null],
+        ["pytest.ini", python ? `${python.shellPrefix} -m pytest` : null]
+      ]
+    : [
+        ["Cargo.toml", "cargo check"],
+        ["go.mod", "go vet ./..."],
+        ["pyproject.toml", python ? `${python.shellPrefix} -m compileall -q .` : null]
+      ];
+  for (const [file, command] of candidates) {
+    if (!command) continue;
+    try {
+      await readRepositoryFile(repository, file);
+      return command;
+    } catch {
+      // Try the next supported project marker.
+    }
+  }
+  throw new Error(`No supported repository ${kind === "tests" ? "test" : "diagnostics"} task was detected`);
+}
 
 function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>[] {
   return [
@@ -224,23 +287,55 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       description: "List files and directories in the configured live repository.", parameters: rawSchemas.tree, skipPermission: true, defer: "never",
       handler: ({ path: requestedPath = ".", depth = 2 }) => listRepositoryTree(repository, requestedPath, depth)
     }),
-    defineTool<{ path: string }>("repo_read_file", {
-      description: "Read a UTF-8 text file from the configured live repository.", parameters: rawSchemas.read, skipPermission: true, defer: "never",
-      handler: ({ path: requestedPath }) => readRepositoryFile(repository, requestedPath)
+    defineTool<{ path: string; startLine?: number; lineCount?: number }>("view", {
+      description: "View a numbered line range from a UTF-8 repository file.", parameters: rawSchemas.view, skipPermission: true, defer: "never",
+      handler: ({ path: requestedPath, startLine = 1, lineCount = 400 }) => viewRepositoryFile(repository, requestedPath, startLine, lineCount)
     }),
-    defineTool<{ query: string }>("repo_search", {
-      description: "Search text in the configured live repository and return file/line matches.", parameters: rawSchemas.search, skipPermission: true, defer: "never",
+    defineTool<{ query: string }>("rg", {
+      description: "Search repository text with ripgrep and return file, line, and column matches.", parameters: rawSchemas.search, skipPermission: true, defer: "never",
       handler: ({ query }) => searchRepository(repository, query)
+    }),
+    defineTool<{ pattern: string }>("glob", {
+      description: "Find repository files matching a glob pattern.", parameters: rawSchemas.glob, skipPermission: true, defer: "never",
+      handler: ({ pattern }) => globRepositoryFiles(repository, pattern)
     }),
     defineTool("repo_git_info", {
       description: "Return the current branch, HEAD SHA, and dirty state of the live repository.", parameters: { type: "object", properties: {}, additionalProperties: false }, skipPermission: true, defer: "never",
       handler: () => getGitInfo(repository)
     }),
-    defineTool<{ command: string; intention: string }>("execute_shell", {
-      description: "Execute a shell command directly on the CopilotDeck host as its current operating-system user. The command can modify the repository and access other host resources.", parameters: rawSchemas.shell, defer: "never",
-      handler: ({ command }) => sandboxRequest("/execute", { repositoryId: repository.id, sessionId, command })
+    defineTool<{ patch: string; intention: string }>("apply_patch", {
+      description: "Apply a unified git diff to files inside the live repository after validating it with git apply --check.", parameters: rawSchemas.patch, defer: "never",
+      handler: ({ patch }) => sandboxRequest("/apply-patch", { repositoryId: repository.id, patch })
     }),
-    defineTool<{ url: string; intention: string }>("fetch_url", {
+    defineTool<{ command: string; intention: string }>("bash", {
+      description: "Start a shell command on the CopilotDeck host and return a bashId for reading or stopping it. Commands run as the host user and may modify the repository or access other resources.", parameters: rawSchemas.shell, defer: "never",
+      handler: ({ command }) => sandboxRequest("/bash", { repositoryId: repository.id, sessionId, command })
+    }),
+    defineTool<{ bashId: string; tailLines?: number }>("read_bash", {
+      description: "Read current output and status from a bash execution started in this session.", parameters: rawSchemas.bashLookup, skipPermission: true, defer: "never",
+      handler: ({ bashId, tailLines }) => sandboxRequest("/bash/read", { sessionId, bashId, ...(tailLines ? { tailLines } : {}) })
+    }),
+    defineTool<{ bashId: string }>("stop_bash", {
+      description: "Stop a bash execution started in this session.", parameters: rawSchemas.bashStop, skipPermission: true, defer: "never",
+      handler: ({ bashId }) => sandboxRequest("/bash/stop", { sessionId, bashId })
+    }),
+    defineTool("list_bash", {
+      description: "List recent bash executions and their status for this session.", parameters: { type: "object", properties: {}, additionalProperties: false }, skipPermission: true, defer: "never",
+      handler: () => sandboxRequest("/bash/list", { sessionId })
+    }),
+    defineTool<{ intention: string }>("problems", {
+      description: "Run the repository's detected typecheck, lint, or compiler diagnostics task and return a bashId.", parameters: rawSchemas.executionTask, defer: "never",
+      handler: async () => sandboxRequest("/bash", { repositoryId: repository.id, sessionId, command: await detectRepositoryCommand(repository, "problems") })
+    }),
+    defineTool<{ intention: string }>("runTests", {
+      description: "Run the repository's detected standard test task and return a bashId.", parameters: rawSchemas.executionTask, defer: "never",
+      handler: async () => sandboxRequest("/bash", { repositoryId: repository.id, sessionId, command: await detectRepositoryCommand(repository, "tests") })
+    }),
+    defineTool<{ bashId: string; tailLines?: number }>("testFailure", {
+      description: "Read the final failing-test output from a runTests bash execution.", parameters: rawSchemas.bashLookup, skipPermission: true, defer: "never",
+      handler: ({ bashId, tailLines = 300 }) => sandboxRequest("/bash/read", { sessionId, bashId, tailLines })
+    }),
+    defineTool<{ url: string; intention: string }>("web_fetch", {
       description: "Fetch a public HTTP or HTTPS URL through the controlled network boundary.", parameters: rawSchemas.url, defer: "never",
       handler: ({ url }) => sandboxRequest("/fetch", { url, maxBytes: 1_000_000 })
     }),
@@ -249,18 +344,19 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: async ({ script, args = [], interpreter = "direct" }) => {
         const absolute = await resolveRepositoryPath(repository, script);
         const relative = path.relative(repository.canonicalPath, absolute);
+        const python = interpreter === "python" ? await resolvePythonLauncher() : null;
         const executable = interpreter === "shell"
           ? (process.platform === "win32" ? "powershell.exe" : "/bin/sh")
           : interpreter === "node"
             ? "node"
             : interpreter === "python"
-              ? (process.platform === "win32" ? "python" : "python3")
+              ? python!.executable
               : absolute;
         const executableArgs = interpreter === "shell" && process.platform === "win32"
           ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", absolute, ...args]
           : interpreter === "direct"
             ? args
-            : [absolute, ...args];
+            : [...(python?.prefixArgs ?? []), absolute, ...args];
         return sandboxRequest("/execute", {
           repositoryId: repository.id,
           sessionId,
@@ -313,7 +409,7 @@ async function runTurn(job: TurnJobLike) {
       enableSkills: true,
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },
-      systemMessage: { mode: "append" as const, content: "You are working with a live repository. SDK write/edit tools are disabled, but approved shell commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Use repository tools for reading and clearly report any command that changes files." },
+      systemMessage: { mode: "append" as const, content: "You are working with a live repository. Use view, rg, glob, and repo_tree for inspection; use apply_patch for focused edits; use problems and runTests for standard validation. Approved bash commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Clearly report changes and validation results." },
       onPermissionRequest: permissionHandler(turn.session.id, turn.id)
     };
     const metadata = await client.getSessionMetadata(turn.session.sdkSessionId);
