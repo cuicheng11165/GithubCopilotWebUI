@@ -21,7 +21,7 @@ await registry.load();
 registry.watch((error) => app.log.error(error, "Repository registry reload failed"));
 const executions = new ExecutionManager();
 
-app.log.warn("Commands and private scripts run directly as the CopilotDeck host user without isolation");
+app.log.warn("Commands and private scripts run directly as the GithubCopilotWebUI host user without isolation");
 
 app.addHook("onRequest", async (request, reply) => {
   if (request.url.startsWith("/health/")) return;

@@ -13,7 +13,7 @@ export type MessageRole = typeof MessageRole[keyof typeof MessageRole];
 export type PermissionStatus = typeof PermissionStatus[keyof typeof PermissionStatus];
 
 export function validateDatabaseUrl(url: string): void {
-  if (!url.startsWith("file:")) throw new Error("CopilotDeck requires a SQLite DATABASE_URL beginning with file:");
+  if (!url.startsWith("file:")) throw new Error("GithubCopilotWebUI requires a SQLite DATABASE_URL beginning with file:");
 }
 
 if (process.env.DATABASE_URL) validateDatabaseUrl(process.env.DATABASE_URL);

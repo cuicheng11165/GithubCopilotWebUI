@@ -1,5 +1,5 @@
 repositories:
   - id: integration-test
-    displayName: CopilotDeck
-    path: /Users/cuicheng/Documents/Github/CopilotDeck
+    displayName: GithubCopilotWebUI
+    path: /Users/cuicheng/Documents/Github/GithubCopilotWebUI
     enabled: true

@@ -308,7 +308,7 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: ({ patch }) => sandboxRequest("/apply-patch", { repositoryId: repository.id, patch })
     }),
     defineTool<{ command: string; intention: string }>("bash", {
-      description: "Start a shell command on the CopilotDeck host and return a bashId for reading or stopping it. Commands run as the host user and may modify the repository or access other resources.", parameters: rawSchemas.shell, defer: "never",
+      description: "Start a shell command on the GithubCopilotWebUI host and return a bashId for reading or stopping it. Commands run as the host user and may modify the repository or access other resources.", parameters: rawSchemas.shell, defer: "never",
       handler: ({ command }) => sandboxRequest("/bash", { repositoryId: repository.id, sessionId, command })
     }),
     defineTool<{ bashId: string; tailLines?: number }>("read_bash", {
@@ -340,7 +340,7 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
       handler: ({ url }) => sandboxRequest("/fetch", { url, maxBytes: 1_000_000 })
     }),
     defineTool<{ script: string; args?: string[]; interpreter?: "direct" | "shell" | "node" | "python"; intention: string }>("run_private_script", {
-      description: "Run a script stored in the repository or one of its private skills directly on the CopilotDeck host without isolation.", parameters: rawSchemas.script, defer: "never",
+      description: "Run a script stored in the repository or one of its private skills directly on the GithubCopilotWebUI host without isolation.", parameters: rawSchemas.script, defer: "never",
       handler: async ({ script, args = [], interpreter = "direct" }) => {
         const absolute = await resolveRepositoryPath(repository, script);
         const relative = path.relative(repository.canonicalPath, absolute);
