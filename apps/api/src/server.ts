@@ -62,6 +62,14 @@ function serializeSession(session: DbChatSession) {
     branch: session.branch,
     headSha: session.headSha,
     dirty: session.dirty,
+    usage: {
+      inputTokens: session.inputTokens,
+      outputTokens: session.outputTokens,
+      cacheReadTokens: session.cacheReadTokens,
+      cacheWriteTokens: session.cacheWriteTokens,
+      reasoningTokens: session.reasoningTokens,
+      aiCredits: session.nanoAiu > 0n ? Number(session.nanoAiu) / 1_000_000_000 : null
+    },
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString()
   };
@@ -242,6 +250,38 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) 
     })),
     skills: session.skillManifest ?? []
   };
+});
+
+app.get<{ Params: { id: string }; Querystring: { limit?: string } }>("/api/sessions/:id/trace", async (request, reply) => {
+  const auth = await authenticate(request, reply);
+  if (!(auth && "user" in auth)) return;
+  const session = await ownedSession(auth.user.id, request.params.id);
+  if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
+  const requestedLimit = Number(request.query.limit ?? 500);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 2_000) {
+    return reply.code(400).send({ error: "Trace limit must be between 1 and 2000" });
+  }
+  const events = await db.sessionEvent.findMany({
+    where: { sessionId: session.id, kind: "llm.trace" },
+    orderBy: { cursor: "desc" },
+    take: requestedLimit
+  });
+  return events.reverse().map((event) => {
+    const payload = event.data && typeof event.data === "object" && !Array.isArray(event.data)
+      ? event.data as Record<string, unknown>
+      : {};
+    return {
+      cursor: Number(event.cursor),
+      turnId: event.turnId,
+      eventType: String(payload.eventType ?? "unknown"),
+      capturedAt: String(payload.capturedAt ?? event.createdAt.toISOString()),
+      contentCaptured: payload.contentCaptured === true,
+      data: payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+        ? payload.data
+        : {}
+    };
+  });
 });
 
 app.patch<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) => {

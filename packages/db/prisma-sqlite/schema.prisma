@@ -74,6 +74,12 @@ model ChatSession {
   headSha            String?
   dirty              Boolean             @default(false)
   skillManifest      Json?
+  inputTokens        Int                 @default(0)
+  outputTokens       Int                 @default(0)
+  cacheReadTokens    Int                 @default(0)
+  cacheWriteTokens   Int                 @default(0)
+  reasoningTokens    Int                 @default(0)
+  nanoAiu            BigInt              @default(0)
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   user               User                 @relation(fields: [userId], references: [id], onDelete: Cascade)

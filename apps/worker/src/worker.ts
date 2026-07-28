@@ -22,11 +22,12 @@ import {
   viewRepositoryFile,
   type RepositoryConfig
 } from "@app/repository-tools";
-import { sanitizeToolEventForLog } from "./tool-event-log.js";
+import { sanitizeSdkEventForLog, sanitizeToolEventForLog } from "./tool-event-log.js";
 import { lastAssistantContent } from "./assistant-response.js";
 import { resolvePythonLauncher } from "./platform.js";
 import { z } from "zod";
 
+const booleanEnvironmentValue = z.enum(["true", "false"]).default("false").transform((value) => value === "true");
 const env = z.object({
   WORKER_CONTROL_HOST: z.string().default("127.0.0.1"),
   WORKER_CONTROL_PORT: z.coerce.number().int().positive().default(4200),
@@ -38,7 +39,10 @@ const env = z.object({
   SANDBOX_RUNNER_URL: z.string().url().default("http://127.0.0.1:4100"),
   SANDBOX_RUNNER_TOKEN: z.string().min(32),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
-  APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300)
+  APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
+  LLM_TRACE_ENABLED: booleanEnvironmentValue,
+  LLM_TRACE_CAPTURE_CONTENT: booleanEnvironmentValue,
+  LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl")
 }).parse(process.env);
 const logger = createServiceLogger({ service: "worker" });
 logger.info({ timestampFormat: "ISO 8601 UTC" }, "Worker session-routed text logging ready");
@@ -71,10 +75,20 @@ async function getCopilotClient(host: string): Promise<CopilotClient> {
   const key = copilotHostKey(host);
   const existing = copilotClients.get(key);
   if (existing) return existing;
+  const traceFile = path.resolve(env.LLM_TRACE_FILE);
+  if (env.LLM_TRACE_ENABLED) await mkdir(path.dirname(traceFile), { recursive: true });
   const client = new CopilotClient({
     mode: "empty",
     baseDirectory: key === "github.com" ? env.COPILOT_HOME : path.join(env.COPILOT_HOME, "runtimes", key),
     useLoggedInUser: false,
+    ...(env.LLM_TRACE_ENABLED ? {
+      telemetry: {
+        exporterType: "file",
+        filePath: traceFile,
+        captureContent: env.LLM_TRACE_CAPTURE_CONTENT,
+        sourceName: "github-copilot-web-ui"
+      }
+    } : {}),
     env: {
       ...copilotRuntimeEnv,
       ...(key === "github.com" ? {} : { COPILOT_GH_HOST: key })
@@ -106,6 +120,28 @@ function decryptToken(value: string): string {
 
 async function appendEvent(sessionId: string, turnId: string | null, kind: string, data: Record<string, unknown>) {
   await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
+}
+
+const tracedSdkEvents = new Set([
+  "system.message",
+  "user.message",
+  "assistant.message",
+  "assistant.usage",
+  "tool.execution_start",
+  "tool.execution_complete",
+  "model.call_failure"
+]);
+
+function traceEventData(event: { type: string; data: Record<string, unknown> }): Record<string, unknown> {
+  const sanitized = sanitizeSdkEventForLog(event.data);
+  if (env.LLM_TRACE_CAPTURE_CONTENT) return sanitized;
+  const metadataKeys = new Set([
+    "model", "apiCallId", "providerCallId", "serviceRequestId", "interactionId", "toolCallId",
+    "toolName", "success", "finishReason", "duration", "inputTokens", "outputTokens",
+    "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "cost", "copilotUsage", "errorType",
+    "statusCode", "code", "role", "name"
+  ]);
+  return Object.fromEntries(Object.entries(sanitized).filter(([key]) => metadataKeys.has(key)));
 }
 
 async function sandboxRequest<T>(pathname: string, body?: unknown): Promise<T> {
@@ -366,7 +402,7 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
         });
       }
     })
-  ];
+  ].map((tool) => ({ ...tool, overridesBuiltInTool: true }));
 }
 
 interface TurnJobLike {
@@ -419,12 +455,50 @@ async function runTurn(job: TurnJobLike) {
     let latestAssistantContent: string | undefined;
     sdkSession.on((rawEvent) => {
       const event = rawEvent as unknown as { type: string; data: Record<string, unknown> };
+      if (env.LLM_TRACE_ENABLED && tracedSdkEvents.has(event.type)) {
+        void appendEvent(turn.session.id, turn.id, "llm.trace", {
+          eventType: event.type,
+          capturedAt: new Date().toISOString(),
+          contentCaptured: env.LLM_TRACE_CAPTURE_CONTENT,
+          data: traceEventData(event)
+        }).catch((error) => turnLogger.error(error, "Failed to persist LLM trace event"));
+      }
       if (event.type === "assistant.message") {
         latestAssistantContent = String(event.data.content ?? "");
         return;
       }
       void (async () => {
-        if (event.type === "assistant.message_delta") await appendEvent(turn.session.id, turn.id, "assistant.delta", { deltaContent: String(event.data.deltaContent ?? "") });
+        if (event.type === "assistant.usage") {
+          const copilotUsage = event.data.copilotUsage as { totalNanoAiu?: unknown } | undefined;
+          const value = (key: string) => {
+            const candidate = event.data[key];
+            return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0 ? Math.trunc(candidate) : 0;
+          };
+          const nanoAiu = typeof copilotUsage?.totalNanoAiu === "number" && Number.isFinite(copilotUsage.totalNanoAiu) && copilotUsage.totalNanoAiu > 0
+            ? BigInt(Math.trunc(copilotUsage.totalNanoAiu))
+            : 0n;
+          const usage = await db.chatSession.update({
+            where: { id: turn.session.id },
+            data: {
+              inputTokens: { increment: value("inputTokens") },
+              outputTokens: { increment: value("outputTokens") },
+              cacheReadTokens: { increment: value("cacheReadTokens") },
+              cacheWriteTokens: { increment: value("cacheWriteTokens") },
+              reasoningTokens: { increment: value("reasoningTokens") },
+              nanoAiu: { increment: nanoAiu }
+            },
+            select: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheWriteTokens: true, reasoningTokens: true, nanoAiu: true }
+          });
+          await appendEvent(turn.session.id, turn.id, "usage.updated", {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            reasoningTokens: usage.reasoningTokens,
+            aiCredits: usage.nanoAiu > 0n ? Number(usage.nanoAiu) / 1_000_000_000 : null
+          });
+        }
+        else if (event.type === "assistant.message_delta") await appendEvent(turn.session.id, turn.id, "assistant.delta", { deltaContent: String(event.data.deltaContent ?? "") });
         else if (event.type === "tool.execution_start") {
           turnLogger.info({ event: "tool.started", tool: sanitizeToolEventForLog(event.data) }, "Tool execution started");
           await appendEvent(turn.session.id, turn.id, "tool.started", event.data);

@@ -29,3 +29,8 @@ function sanitize(value: unknown, depth: number, key?: string): unknown {
 export function sanitizeToolEventForLog(data: Record<string, unknown>): Record<string, unknown> {
   return sanitize(data, 0) as Record<string, unknown>;
 }
+
+/** Redacts secrets and bounds arbitrary SDK event payloads before persistence. */
+export function sanitizeSdkEventForLog(data: Record<string, unknown>): Record<string, unknown> {
+  return sanitize(data, 0) as Record<string, unknown>;
+}

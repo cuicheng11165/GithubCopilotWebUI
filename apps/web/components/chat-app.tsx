@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Github, LogOut, Menu, Pencil, Plus, Send, ShieldAlert, Square, Trash2, X } from "lucide-react";
-import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
-import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions } from "../lib/api";
+import { Activity, Bot, Github, LogOut, Menu, Pencil, Plus, Send, ShieldAlert, Square, Trash2, X } from "lucide-react";
+import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
+import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions, getSessionTrace } from "../lib/api";
 import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
@@ -27,6 +27,9 @@ export function ChatApp() {
   const [runningTurnId, setRunningTurnId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [trace, setTrace] = useState<LlmTraceEntry[]>([]);
+  const [traceLoading, setTraceLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const active = useMemo(() => sessions.find((session) => session.id === activeId) ?? null, [sessions, activeId]);
   const conversationItems = useMemo(() => groupConversationMessages(messages), [messages]);
@@ -49,9 +52,9 @@ export function ChatApp() {
   })(); }, []);
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setActiveTool(null); setRunningTurnId(null); return; }
+    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); return; }
     setStreaming("");
-    setActiveTool(null); setRunningTurnId(null);
+    setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false);
     void getSession(activeId).then((detail) => { setMessages(detail.messages); setPermissions(detail.permissions); setSkills(detail.skills); }).catch((caught) => setError(caught instanceof Error ? caught.message : "Failed to load session"));
     const events = new EventSource(`/api/sessions/${activeId}/events`, { withCredentials: true });
     const handle = (raw: Event) => {
@@ -68,6 +71,19 @@ export function ChatApp() {
         setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
       }
       if (payload.kind === "tool.started") setActiveTool({ name: String(payload.data.toolName ?? payload.data.name ?? "Agent tool"), turnId: payload.turnId });
+      if (payload.kind === "usage.updated") {
+        setSessions((current) => current.map((item) => item.id === activeId ? {
+          ...item,
+          usage: {
+            inputTokens: Number(payload.data.inputTokens ?? 0),
+            outputTokens: Number(payload.data.outputTokens ?? 0),
+            cacheReadTokens: Number(payload.data.cacheReadTokens ?? 0),
+            cacheWriteTokens: Number(payload.data.cacheWriteTokens ?? 0),
+            reasoningTokens: Number(payload.data.reasoningTokens ?? 0),
+            aiCredits: typeof payload.data.aiCredits === "number" ? payload.data.aiCredits : null
+          }
+        } : item));
+      }
       if (payload.kind === "permission.requested") setPermissions((current) => [...current.filter((item) => item.id !== payload.data.id), payload.data as unknown as PermissionRequest]);
       if (payload.kind === "permission.completed") setPermissions((current) => current.filter((item) => item.id !== payload.data.requestId));
       if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
@@ -82,7 +98,7 @@ export function ChatApp() {
       }
       if (["turn.completed", "turn.failed", "turn.stopped", "session.updated"].includes(payload.kind)) void refreshSessions();
     };
-    ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "turn.completed", "turn.failed", "turn.stopped", "session.updated"].forEach((kind) => events.addEventListener(kind, handle));
+    ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "usage.updated", "turn.completed", "turn.failed", "turn.stopped", "session.updated"].forEach((kind) => events.addEventListener(kind, handle));
     return () => events.close();
   }, [activeId, refreshSessions]);
   useEffect(() => {
@@ -110,6 +126,15 @@ export function ChatApp() {
     const updated = await apiWrite<ChatSession>(`/api/sessions/${session.id}`, me.csrfToken, "PATCH", patch);
     setSessions((current) => current.map((item) => item.id === updated.id ? updated : item));
   };
+  const toggleTrace = async () => {
+    const next = !traceOpen;
+    setTraceOpen(next);
+    if (!next || !active) return;
+    setTraceLoading(true);
+    try { setTrace(await getSessionTrace(active.id)); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "LLM trace could not be loaded"); }
+    finally { setTraceLoading(false); }
+  };
   const remove = async (session: ChatSession) => {
     if (!window.confirm(`Permanently delete “${session.title}”? This cannot be undone.`)) return;
     await apiWrite(`/api/sessions/${session.id}`, me.csrfToken, "DELETE");
@@ -134,7 +159,9 @@ export function ChatApp() {
       {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run approved commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
         {active.approvalMode === "allow-all" && <div className="allow-all-banner"><ShieldAlert size={15} /> Allow all is active. Commands, public URL requests, and private scripts run without approval.</div>}
         {active.approvalMode === "session-scoped" && <div className="session-scope-bar"><span>Auto approve for this session:</span>{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={active.approvalScopes.includes(scope)} onChange={() => void updateSession(active, { approvalScopes: active.approvalScopes.includes(scope) ? active.approvalScopes.filter((item) => item !== scope) : [...active.approvalScopes, scope] })} />{scope === "private-script" ? "Private scripts" : scope === "url" ? "URL" : "Shell"}</label>)}</div>}
-        <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>{conversationItems.map((item) => item.kind === "message"
+        <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span><span title={`Input ${active.usage.inputTokens.toLocaleString()} · Output ${active.usage.outputTokens.toLocaleString()} · Cache read ${active.usage.cacheReadTokens.toLocaleString()} · Cache write ${active.usage.cacheWriteTokens.toLocaleString()} · Reasoning ${active.usage.reasoningTokens.toLocaleString()}`}>{(active.usage.inputTokens + active.usage.outputTokens).toLocaleString()} tokens</span>{active.usage.aiCredits !== null && <span>{active.usage.aiCredits.toLocaleString(undefined, { maximumFractionDigits: 6 })} AI credits</span>}<button className="trace-toggle" onClick={() => void toggleTrace()}><Activity size={13} /> LLM trace</button>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>
+          {traceOpen && <div className="trace-panel"><div className="trace-panel-header"><strong>LLM trace</strong><span>{trace.length} events</span></div>{traceLoading ? <p>Loading trace…</p> : trace.length === 0 ? <p>No trace events were captured. Enable LLM_TRACE_ENABLED and restart the Worker.</p> : trace.map((entry) => <details key={entry.cursor} className="trace-entry"><summary><time>{new Date(entry.capturedAt).toLocaleTimeString()}</time><code>{entry.eventType}</code>{entry.contentCaptured && <span>content</span>}</summary><pre>{JSON.stringify(entry.data, null, 2)}</pre></details>)}</div>}
+          {conversationItems.map((item) => item.kind === "message"
           ? <Message key={item.key} message={item.message} />
           : <ToolActivityGroup key={item.key} messages={item.messages} isRunning={item.turnId !== null && item.turnId === activeToolTurnId && !completedTurnIds.has(item.turnId)} runningTool={item.turnId === activeTool?.turnId ? activeTool.name : null} />)}
           {activeToolTurnId !== null && !hasActiveToolGroup && !completedTurnIds.has(activeToolTurnId) && <ToolActivityGroup messages={[]} isRunning runningTool={activeTool?.name ?? null} />}

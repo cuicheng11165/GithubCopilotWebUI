@@ -44,6 +44,14 @@ export const sessionSchema = z.object({
   branch: z.string().nullable(),
   headSha: z.string().nullable(),
   dirty: z.boolean(),
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    cacheReadTokens: z.number().int().nonnegative(),
+    cacheWriteTokens: z.number().int().nonnegative(),
+    reasoningTokens: z.number().int().nonnegative(),
+    aiCredits: z.number().nonnegative().nullable()
+  }),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 });
@@ -114,6 +122,8 @@ export const eventKindSchema = z.enum([
   "permission.requested",
   "permission.completed",
   "repository.changed",
+  "usage.updated",
+  "llm.trace",
   "session.updated",
   "turn.completed",
   "turn.stopped",
@@ -144,4 +154,13 @@ export interface ModelSummary {
   id: string;
   name: string;
   supportsReasoning: boolean;
+}
+
+export interface LlmTraceEntry {
+  cursor: number;
+  turnId: string | null;
+  eventType: string;
+  capturedAt: string;
+  contentCaptured: boolean;
+  data: Record<string, unknown>;
 }

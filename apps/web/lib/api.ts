@@ -1,4 +1,4 @@
-import type { AuthUser, ChatMessage, ChatSession, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
+import type { AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
 
 export interface SessionDetail {
   session: ChatSession;
@@ -39,4 +39,5 @@ export const getMe = () => apiGet<AuthUser>("/api/me");
 export const getRepositories = () => apiGet<RepositorySummary[]>("/api/repositories");
 export const getModels = () => apiGet<ModelSummary[]>("/api/models");
 export const getSessions = () => apiGet<ChatSession[]>("/api/sessions");
+export const getSessionTrace = (id: string) => apiGet<LlmTraceEntry[]>(`/api/sessions/${id}/trace`);
 export const getSession = (id: string) => apiGet<SessionDetail>(`/api/sessions/${id}`);
