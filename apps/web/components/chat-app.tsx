@@ -34,7 +34,11 @@ export function ChatApp() {
   const activeToolTurnId = runningTurnId ?? activeTool?.turnId ?? null;
   const hasActiveToolGroup = activeToolTurnId !== null && conversationItems.some((item) => item.kind === "tool-group" && item.turnId === activeToolTurnId);
 
-  const refreshSessions = useCallback(async () => { const data = await getSessions(); setSessions(data); if (!activeId && data[0]) setActiveId(data[0].id); }, [activeId]);
+  const refreshSessions = useCallback(async () => {
+    const data = await getSessions();
+    setSessions(data);
+    setActiveId((current) => current ?? data[0]?.id ?? null);
+  }, []);
   useEffect(() => { void (async () => {
     try {
       const user = await getMe(); setMe(user);
