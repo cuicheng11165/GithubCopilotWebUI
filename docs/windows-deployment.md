@@ -44,6 +44,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```dotenv
 NODE_ENV=production
 PUBLIC_APP_URL=http://localhost:3000
+WEB_PORT=3000
 API_HOST=127.0.0.1
 API_PORT=4000
 SANDBOX_RUNNER_HOST=127.0.0.1
@@ -144,6 +145,8 @@ Invoke-RestMethod http://localhost:4100/health/ready
 
 本机启动默认绑定 `127.0.0.1`。需要远程访问时，应使用 IIS、Caddy、Nginx 或企业网关提供 HTTPS 和身份边界，只对外公开 Web 端口。反向代理必须支持 Server-Sent Events，并避免缓冲流式响应。
 
+IIS 的完整手工配置、证书绑定、WebSocket 和排错步骤见 [IIS HTTPS 反向代理部署](iis-reverse-proxy.md)。
+
 ## 7. 备份、恢复和升级
 
 一致性离线备份前停止应用，然后一起备份：
@@ -190,7 +193,7 @@ Get-NetTCPConnection -LocalPort 3000,4000,4100,4200 -ErrorAction SilentlyContinu
   Select-Object LocalAddress,LocalPort,State,OwningProcess
 ```
 
-可在 `.env` 中调整 API、Execution Runner 和 Worker control 端口；修改端口后同步修改对应 URL。
+可在 `.env` 中通过 `WEB_PORT` 调整 Web 端口，也可调整 API、Execution Runner 和 Worker control 端口；修改端口后同步修改 `PUBLIC_APP_URL` 和对应 URL。生产环境应由 IIS、Caddy、Nginx 或企业网关在 443 端口终止 TLS，再反向代理到 Web 的内部 HTTP 端口，不要让 Node.js 直接提供明文 HTTP 的 443 端口。
 
 ### Agent 命令语法错误
 
