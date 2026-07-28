@@ -32,7 +32,7 @@ const programs = [
   { name: "api", cwd: root, entry: "apps/api/dist/server.js", args: [] },
   { name: "worker", cwd: root, entry: "apps/worker/dist/worker.js", args: [] },
   { name: "sandbox-runner", cwd: root, entry: "apps/sandbox-runner/dist/server.js", args: [] },
-  { name: "web", cwd: webStandalone, entry: "apps/web/server.js", args: [], env: { HOSTNAME: "127.0.0.1", PORT: "3000" } }
+  { name: "web", cwd: webStandalone, entry: "apps/web/server.js", args: [], env: { HOSTNAME: "127.0.0.1", PORT: process.env.WEB_PORT ?? "3000" } }
 ];
 
 for (const program of programs) {
