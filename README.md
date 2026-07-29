@@ -34,6 +34,7 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 ### 仓库选择与仓库上下文
 
 - 管理员在 `config/repositories.yaml` 中登记本机上的可信仓库。
+- 仓库可通过 `customAgentName` 绑定 `.github/agents` 或 `.claude/agents` 中的 Copilot custom agent；配置后，该仓库每次新建或恢复会话都会预选此 agent。
 - API 会返回每个启用仓库的基本信息，包括显示名称、当前分支、HEAD SHA、工作区是否有未提交改动等。
 - Agent 可以通过只读工具查看仓库树、读取 UTF-8 文本文件、执行文本搜索和获取 Git 状态。
 - 仓库路径访问会阻止绝对路径、父目录穿越以及逃逸仓库根目录的符号链接。
@@ -313,6 +314,7 @@ GithubCopilotWebUI is designed to provide a unified Copilot Agent entry point fo
 ### Repository Selection And Context
 
 - Administrators register trusted local repositories in `config/repositories.yaml`.
+- A repository can use `customAgentName` to bind a Copilot custom agent from `.github/agents` or `.claude/agents`; every newly created or resumed session for that repository pre-selects it.
 - The API returns metadata for each enabled repository, including display name, current branch, HEAD SHA, and dirty working tree status.
 - The Agent can use read-only tools to inspect the repository tree, read UTF-8 text files, run text search, and inspect Git status.
 - Repository path access blocks absolute paths, parent traversal, and symlinks that escape the repository root.

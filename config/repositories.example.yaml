@@ -2,4 +2,8 @@ repositories:
   - id: example
     displayName: Example Repository
     path: /absolute/path/to/repository
+    # Optional: pre-select this repository custom agent for every conversation.
+    # Use the agent identifier recognized by Copilot, for example gao-qa.agent
+    # for .github/agents/gao-qa.agent.md.
+    customAgentName: gao-qa.agent
     enabled: true

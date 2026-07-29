@@ -2,9 +2,36 @@ import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { globRepositoryFiles, readRepositoryFile, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
+import { globRepositoryFiles, readRepositoryFile, RepositoryRegistry, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
 
 describe("repository tools", () => {
+  it("loads an optional repository custom agent name", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const config = path.join(root, "repositories.yaml");
+    await writeFile(config, `repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+    customAgentName: gao-qa.agent
+`);
+    const registry = new RepositoryRegistry(config);
+    await registry.load();
+    expect(registry.get("test").customAgentName).toBe("gao-qa.agent");
+  });
+
+  it("rejects an invalid repository custom agent identifier", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const config = path.join(root, "repositories.yaml");
+    await writeFile(config, `repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+    customAgentName: Security Reviewer
+`);
+    const registry = new RepositoryRegistry(config);
+    await expect(registry.load()).rejects.toThrow("Custom agent name");
+  });
+
   it("discovers skills by documented precedence", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
     await mkdir(path.join(root, ".github/skills/review"), { recursive: true });
