@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import type { ApprovalMode, ApprovalScope, ModelSummary, RepositorySummary } from "@app/contracts";
 
@@ -13,11 +13,14 @@ interface Props {
 
 export function NewSessionDialog({ repositories, models, onClose, onCreate }: Props) {
   const [repositoryId, setRepositoryId] = useState(repositories[0]?.id ?? "");
-  const [model, setModel] = useState("auto");
+  const [model, setModel] = useState(models[0]?.id ?? "");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("interactive");
   const [scopes, setScopes] = useState<ApprovalScope[]>([]);
   const [busy, setBusy] = useState(false);
   const selected = useMemo(() => repositories.find((repository) => repository.id === repositoryId), [repositories, repositoryId]);
+  useEffect(() => {
+    if (!models.some((item) => item.id === model)) setModel(models[0]?.id ?? "");
+  }, [model, models]);
 
   const toggleScope = (scope: ApprovalScope) => setScopes((current) => current.includes(scope) ? current.filter((item) => item !== scope) : [...current, scope]);
   return (
@@ -32,7 +35,7 @@ export function NewSessionDialog({ repositories, models, onClose, onCreate }: Pr
         </fieldset>
         {approvalMode === "session-scoped" && <div className="scope-grid">{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} /> {scope === "private-script" ? "Private scripts" : scope[0]?.toUpperCase() + scope.slice(1)}</label>)}</div>}
         {approvalMode === "allow-all" && <div className="warning-banner">Allow all runs commands and scripts on the host without prompting or isolation. They can modify the repository and access other host files.</div>}
-        <div className="dialog-footer"><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={!repositoryId || busy} onClick={() => { setBusy(true); void onCreate({ repositoryId, model, approvalMode, approvalScopes: approvalMode === "session-scoped" ? scopes : [] }).finally(() => setBusy(false)); }}>{busy ? "Creating…" : "Start conversation"}</button></div>
+        <div className="dialog-footer"><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={!repositoryId || !model || busy} onClick={() => { setBusy(true); void onCreate({ repositoryId, model, approvalMode, approvalScopes: approvalMode === "session-scoped" ? scopes : [] }).finally(() => setBusy(false)); }}>{busy ? "Creating…" : "Start conversation"}</button></div>
       </section>
     </div>
   );

@@ -18,7 +18,7 @@ export function ChatApp() {
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [skills, setSkills] = useState<Array<{ name: string; warning: string | null }>>([]);
   const [repositories, setRepositories] = useState<RepositorySummary[]>([]);
-  const [models, setModels] = useState<ModelSummary[]>([{ id: "auto", name: "Auto", supportsReasoning: false }]);
+  const [models, setModels] = useState<ModelSummary[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draft, setDraft] = useState("");
@@ -155,7 +155,6 @@ export function ChatApp() {
     </aside>
     <section className="chat-panel">
       <header className="chat-header"><button className="icon-button" onClick={() => setSidebarOpen((value) => !value)}><Menu size={19} /></button>{active ? <><div className="header-title"><strong>{active.title}</strong><span>{active.repositoryName} · {active.branch ?? "live"} {active.headSha ? `@ ${active.headSha.slice(0, 8)}` : ""}{active.dirty ? " · modified" : ""}</span></div><div className="header-controls"><select aria-label="Approval mode" className={`mode-pill mode-select ${active.approvalMode === "allow-all" ? "danger" : ""}`} value={active.approvalMode} onChange={(event) => void updateSession(active, { approvalMode: event.target.value, approvalScopes: event.target.value === "session-scoped" ? active.approvalScopes : [] })}><option value="interactive">interactive</option><option value="session-scoped">session-scoped</option><option value="allow-all">allow-all</option></select><select aria-label="Model" className="model-pill model-select" value={active.model} onChange={(event) => void updateSession(active, { model: event.target.value })}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div></> : <div className="header-title"><strong>Copilot Workspace</strong><span>Select or create a conversation</span></div>}</header>
-      <div className="local-execution-banner"><ShieldAlert size={15} /> Local execution is not isolated. Approved commands and scripts can modify repositories and access host files.</div>
       {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run approved commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
         {active.approvalMode === "allow-all" && <div className="allow-all-banner"><ShieldAlert size={15} /> Allow all is active. Commands, public URL requests, and private scripts run without approval.</div>}
         {active.approvalMode === "session-scoped" && <div className="session-scope-bar"><span>Auto approve for this session:</span>{(["shell", "url", "private-script"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={active.approvalScopes.includes(scope)} onChange={() => void updateSession(active, { approvalScopes: active.approvalScopes.includes(scope) ? active.approvalScopes.filter((item) => item !== scope) : [...active.approvalScopes, scope] })} />{scope === "private-script" ? "Private scripts" : scope === "url" ? "URL" : "Shell"}</label>)}</div>}

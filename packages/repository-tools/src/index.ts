@@ -8,7 +8,14 @@ import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 
+function toPosixPath(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
 const repositoryConfigSchema = z.object({
+  modelBlacklist: z.array(z.string().trim().min(1).max(100))
+    .default([])
+    .transform((models) => [...new Set(models)]),
   repositories: z.array(z.object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]{0,99}$/),
     displayName: z.string().min(1).max(120),
@@ -17,10 +24,6 @@ const repositoryConfigSchema = z.object({
       .trim()
       .min(1)
       .max(100)
-      .regex(
-        /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/,
-        "Custom agent name must contain only lowercase letters, numbers, dots, and hyphens"
-      )
       .optional(),
     enabled: z.boolean().default(true)
   })).min(1)
@@ -73,7 +76,7 @@ async function walkReadableFiles(repository: RepositoryConfig, maxFiles = 100_00
       if (EXCLUDED_SEGMENTS.has(entry.name) || entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) await visit(absolute);
-      else if (entry.isFile()) results.push(path.relative(repository.canonicalPath, absolute).split(path.sep).join("/"));
+      else if (entry.isFile()) results.push(toPosixPath(path.relative(repository.canonicalPath, absolute)));
     }
   }
   await visit(repository.canonicalPath);
@@ -109,6 +112,7 @@ async function runRipgrep(repository: RepositoryConfig, args: string[]): Promise
 
 export class RepositoryRegistry {
   private repositories = new Map<string, RepositoryConfig>();
+  private modelBlacklist = new Set<string>();
   private watcher: FSWatcher | undefined;
   private reloadTimer: NodeJS.Timeout | undefined;
 
@@ -137,6 +141,7 @@ export class RepositoryRegistry {
     }
 
     this.repositories = next;
+    this.modelBlacklist = new Set(parsed.modelBlacklist);
   }
 
   watch(onError: (error: Error) => void = console.error): void {
@@ -154,6 +159,14 @@ export class RepositoryRegistry {
 
   list(): RepositoryConfig[] {
     return [...this.repositories.values()].filter((repository) => repository.enabled);
+  }
+
+  getModelBlacklist(): ReadonlySet<string> {
+    return this.modelBlacklist;
+  }
+
+  isModelAllowed(model: string): boolean {
+    return model !== "auto" && !this.modelBlacklist.has(model);
   }
 
   get(id: string): RepositoryConfig {
@@ -294,7 +307,7 @@ export async function listRepositoryTree(repository: RepositoryConfig, requested
       if (results.length >= maxEntries) break;
       if (EXCLUDED_SEGMENTS.has(entry.name)) continue;
       const absolute = path.join(directory, entry.name);
-      const relative = path.relative(repository.canonicalPath, absolute);
+      const relative = toPosixPath(path.relative(repository.canonicalPath, absolute));
       results.push(entry.isDirectory() ? `${relative}/` : relative);
       if (entry.isDirectory() && !entry.isSymbolicLink()) await visit(absolute, remainingDepth - 1);
     }
@@ -308,7 +321,9 @@ export async function globRepositoryFiles(repository: RepositoryConfig, pattern:
   if (!pattern.trim()) throw new Error("Glob pattern is required");
   try {
     const result = await runRipgrep(repository, ["--files", "--hidden", ...ripgrepExcludes(), "--glob", pattern]);
-    if (result.code === 0 || result.code === 1) return result.stdout.split(/\r?\n/).filter(Boolean).slice(0, maxResults);
+    if (result.code === 0 || result.code === 1) {
+      return result.stdout.split(/\r?\n/).filter(Boolean).map(toPosixPath).slice(0, maxResults);
+    }
     throw new Error(result.stderr || `rg exited with code ${result.code}`);
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;

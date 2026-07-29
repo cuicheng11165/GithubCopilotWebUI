@@ -112,6 +112,9 @@ GitHub App 的本机配置通常为：
 编辑 `config/repositories.yaml`，使用真实的绝对路径：
 
 ```yaml
+modelBlacklist:
+  - weak-model-id
+
 repositories:
   - id: platform-api
     displayName: Platform API
@@ -125,7 +128,7 @@ repositories:
     enabled: true
 ```
 
-路径必须是绝对路径且目录已经存在。不要使用 `~`、环境变量或尚未挂载的网络目录。`customAgentName` 是可选的 Copilot agent 标识；例如 `.github/agents/gao-qa.agent.md` 可配置为 `gao-qa.agent`。配置后该仓库的所有会话都会预选此 agent；不配置则不增加 custom agent 工作边界。仓库内容和 skill 对所有授权用户可见。配置修改会自动重新加载；无效更新会被拒绝并继续使用最后一份有效配置。
+`modelBlacklist` 可选，按 Copilot 返回的模型 ID 精确匹配；被列出的模型不会出现在模型列表中，也不能用于新建、修改或继续运行会话。自动模型路由 `auto` 已禁用，用户必须明确选择一个可用模型。路径必须是绝对路径且目录已经存在。不要使用 `~`、环境变量或尚未挂载的网络目录。`customAgentName` 是可选的 Copilot agent 名称，必须与 agent 文件 frontmatter 中的 `name` 完全一致；例如 `.github/agents/gao-qa.agent.md` 中声明 `name: "Gao Q&A"` 时，应配置为 `"Gao Q&A"`。配置后该仓库的所有会话都会预选此 agent；不配置则不增加 custom agent 工作边界。仓库内容和 skill 对所有授权用户可见。配置修改会自动重新加载；无效更新会被拒绝并继续使用最后一份有效配置。
 
 检查运行账户是否拥有所需权限：
 
