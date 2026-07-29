@@ -5,6 +5,25 @@ import { describe, expect, it, vi } from "vitest";
 import { globRepositoryFiles, readRepositoryFile, RepositoryRegistry, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
 
 describe("repository tools", () => {
+  it("loads and deduplicates the model blacklist and rejects automatic routing", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const config = path.join(root, "repositories.yaml");
+    await writeFile(config, `modelBlacklist:
+  - weak-model
+  - weak-model
+repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+`);
+    const registry = new RepositoryRegistry(config);
+    await registry.load();
+    expect([...registry.getModelBlacklist()]).toEqual(["weak-model"]);
+    expect(registry.isModelAllowed("weak-model")).toBe(false);
+    expect(registry.isModelAllowed("strong-model")).toBe(true);
+    expect(registry.isModelAllowed("auto")).toBe(false);
+  });
+
   it("loads an optional repository custom agent name", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
     const config = path.join(root, "repositories.yaml");
@@ -12,24 +31,24 @@ describe("repository tools", () => {
   - id: test
     displayName: Test
     path: ${JSON.stringify(root)}
-    customAgentName: gao-qa.agent
+    customAgentName: Gao Q&A
 `);
     const registry = new RepositoryRegistry(config);
     await registry.load();
-    expect(registry.get("test").customAgentName).toBe("gao-qa.agent");
+    expect(registry.get("test").customAgentName).toBe("Gao Q&A");
   });
 
-  it("rejects an invalid repository custom agent identifier", async () => {
+  it("rejects an empty repository custom agent name", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
     const config = path.join(root, "repositories.yaml");
     await writeFile(config, `repositories:
   - id: test
     displayName: Test
     path: ${JSON.stringify(root)}
-    customAgentName: Security Reviewer
+    customAgentName: "   "
 `);
     const registry = new RepositoryRegistry(config);
-    await expect(registry.load()).rejects.toThrow("Custom agent name");
+    await expect(registry.load()).rejects.toThrow();
   });
 
   it("discovers skills by documented precedence", async () => {

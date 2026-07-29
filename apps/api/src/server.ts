@@ -187,7 +187,7 @@ app.get("/api/models", async (request, reply) => {
   try {
     return await workerRequest("/models", { githubAccountId: auth.account.id });
   } catch {
-    return [{ id: "auto", name: "Auto", supportsReasoning: false }];
+    return [];
   }
 });
 
@@ -203,6 +203,7 @@ app.post("/api/sessions", async (request, reply) => {
   if (!(auth && "user" in auth)) return;
   const parsed = createSessionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid session configuration", details: parsed.error.flatten() });
+  if (!registry.isModelAllowed(parsed.data.model)) return reply.code(400).send({ error: "Model is not allowed" });
   let repository;
   try { repository = registry.get(parsed.data.repositoryId); } catch { return reply.code(404).send({ error: "Repository not found" }); }
   const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
@@ -292,6 +293,7 @@ app.patch<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply
   bindSessionLog(request, auth.user.id, session.id);
   const parsed = updateSessionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid update", details: parsed.error.flatten() });
+  if (parsed.data.model !== undefined && !registry.isModelAllowed(parsed.data.model)) return reply.code(400).send({ error: "Model is not allowed" });
   const nextMode = parsed.data.approvalMode ?? fromDbApprovalMode(session.approvalMode);
   const nextScopes = parsed.data.approvalScopes ?? approvalScopesFromDb(session.approvalScopes);
   if (nextMode !== "session-scoped" && nextScopes.length > 0) return reply.code(400).send({ error: "Approval scopes are only valid in session-scoped mode" });

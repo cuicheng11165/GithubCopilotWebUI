@@ -78,7 +78,7 @@ async function getCopilotClient(host: string): Promise<CopilotClient> {
   const traceFile = path.resolve(env.LLM_TRACE_FILE);
   if (env.LLM_TRACE_ENABLED) await mkdir(path.dirname(traceFile), { recursive: true });
   const client = new CopilotClient({
-    mode: "empty",
+    mode: "copilot-cli",
     baseDirectory: key === "github.com" ? env.COPILOT_HOME : path.join(env.COPILOT_HOME, "runtimes", key),
     useLoggedInUser: false,
     ...(env.LLM_TRACE_ENABLED ? {
@@ -420,6 +420,9 @@ async function runTurn(job: TurnJobLike) {
     turnLogger = logger.child({ userId: turn.session.userId, sessionId: turn.session.id, turnId: turn.id });
     turnLogger.info("Turn processing started");
     if (turn.status === TurnStatus.STOPPED) return;
+    if (!registry.isModelAllowed(turn.session.model)) {
+      throw new Error(`Model is not allowed: ${turn.session.model}`);
+    }
     const repository = registry.get(turn.session.repositoryId);
     const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
     await db.$transaction([
@@ -437,8 +440,6 @@ async function runTurn(job: TurnJobLike) {
       workingDirectory: repository.canonicalPath,
       streaming: true,
       tools,
-      availableTools: tools.map((tool) => `custom:${tool.name}`),
-      excludedTools: ["builtin:*", "mcp:*"],
       skillDirectories,
       disabledSkills: [],
       // Repository config discovery is required for a pre-selected project
@@ -567,7 +568,7 @@ async function handleControl(name: string, data: Record<string, unknown>) {
     const token = decryptToken(account.encryptedAccessToken);
     const host = copilotHostKey(account.host);
     const modelClient = new CopilotClient({
-      mode: "empty",
+      mode: "copilot-cli",
       baseDirectory: path.join(env.COPILOT_HOME, "model-clients", account.id),
       gitHubToken: token,
       useLoggedInUser: false,
@@ -576,7 +577,9 @@ async function handleControl(name: string, data: Record<string, unknown>) {
     try {
       await modelClient.start();
       const models = await modelClient.listModels();
-      return [{ id: "auto", name: "Auto", supportsReasoning: false }, ...models.map((model) => ({ id: model.id, name: model.name ?? model.id, supportsReasoning: Boolean(model.capabilities?.supports?.reasoningEffort) }))];
+      return models
+        .filter((model) => registry.isModelAllowed(model.id))
+        .map((model) => ({ id: model.id, name: model.name ?? model.id, supportsReasoning: Boolean(model.capabilities?.supports?.reasoningEffort) }));
     } finally { await modelClient.stop(); }
   }
   const sessionId = String(data.sessionId);

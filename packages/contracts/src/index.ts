@@ -59,7 +59,7 @@ export type ChatSession = z.infer<typeof sessionSchema>;
 
 export const createSessionSchema = z.object({
   repositoryId: z.string().min(1).max(100),
-  model: z.string().min(1).max(100).default("auto"),
+  model: z.string().min(1).max(100),
   approvalMode: approvalModeSchema.default("interactive"),
   approvalScopes: z.array(approvalScopeSchema).default([])
 }).superRefine((value, context) => {
