@@ -116,6 +116,7 @@ repositories:
   - id: platform-api
     displayName: Platform API
     path: /Users/copilot/Developer/platform-api
+    customAgentName: security-reviewer
     enabled: true
 
   - id: web-client
@@ -124,7 +125,7 @@ repositories:
     enabled: true
 ```
 
-路径必须是绝对路径且目录已经存在。不要使用 `~`、环境变量或尚未挂载的网络目录。仓库内容和 skill 对所有授权用户可见。配置修改会自动重新加载；无效更新会被拒绝并继续使用最后一份有效配置。
+路径必须是绝对路径且目录已经存在。不要使用 `~`、环境变量或尚未挂载的网络目录。`customAgentName` 是可选的 Copilot agent 标识；例如 `.github/agents/gao-qa.agent.md` 可配置为 `gao-qa.agent`。配置后该仓库的所有会话都会预选此 agent；不配置则不增加 custom agent 工作边界。仓库内容和 skill 对所有授权用户可见。配置修改会自动重新加载；无效更新会被拒绝并继续使用最后一份有效配置。
 
 检查运行账户是否拥有所需权限：
 
