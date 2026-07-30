@@ -43,6 +43,11 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 
 ```dotenv
 NODE_ENV=production
+LOG_LEVEL=info
+LOG_DIR=./data/logs
+LOG_ROTATE_MAX_BYTES=52428800
+LOG_ROTATE_MAX_FILES=10
+LOG_ROTATE_COMPRESS=true
 PUBLIC_APP_URL=http://localhost:3000
 WEB_PORT=3000
 API_HOST=127.0.0.1
@@ -146,6 +151,11 @@ Invoke-RestMethod http://localhost:4100/health/ready
 
 5. Start in 填写项目绝对路径。
 6. 配置失败后自动重启，并避免重复实例。
+
+应用自身的 API、Worker、用户和会话日志会按照 `.env` 中的轮转参数自动处理。
+上面的 `data\github-copilot-web-ui.log` 是 Task Scheduler 外层重定向文件，不经过应用日志模块；
+应另外创建定时维护任务，在停止应用后归档或清空该文件。不要在进程运行时直接删除被
+`cmd.exe` 占用的日志。
 
 本机启动默认绑定 `127.0.0.1`。需要远程访问时，应使用 IIS、Caddy、Nginx 或企业网关提供 HTTPS 和身份边界，只对外公开 Web 端口。反向代理必须支持 Server-Sent Events，并避免缓冲流式响应。
 

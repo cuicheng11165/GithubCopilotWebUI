@@ -72,6 +72,9 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 NODE_ENV=production
 LOG_LEVEL=info
 LOG_DIR=./data/logs
+LOG_ROTATE_MAX_BYTES=52428800
+LOG_ROTATE_MAX_FILES=10
+LOG_ROTATE_COMPRESS=true
 PUBLIC_APP_URL=http://localhost:3000
 API_HOST=127.0.0.1
 API_PORT=4000
@@ -250,6 +253,11 @@ launchctl print "gui/$(id -u)/com.local.githubcopilotwebui"
 tail -f data/launchd.stdout.log data/launchd.stderr.log
 find data/logs -maxdepth 6 -type f -name '*.log' -print
 ```
+
+`data/logs` 下的 API、Worker、用户和会话日志会按照 `.env` 中的轮转参数自动处理。
+`launchd.stdout.log` 和 `launchd.stderr.log` 是 launchd 自己打开的外层日志，不经过应用
+日志模块；应使用 macOS 的 `newsyslog` 配置单独轮转，或在 `launchctl bootout` 停止服务后
+归档。不要在服务运行时直接删除这两个文件。
 
 停止或卸载：
 

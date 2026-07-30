@@ -106,6 +106,8 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 
 - API 与 Worker 使用结构化日志。
 - 会话相关日志会按用户和会话分流写入：`LOG_DIR/users/<userId>/sessions/<sessionId>/`。
+- 文件日志默认达到 50 MiB 后轮转，保留 10 份 gzip 压缩归档；可通过
+  `LOG_ROTATE_MAX_BYTES`、`LOG_ROTATE_MAX_FILES` 和 `LOG_ROTATE_COMPRESS` 调整。
 - 用户输入、Agent 完整回复、审批决策、生命周期事件等会被记录到数据库或日志中。
 - SQLite 保存用户、GitHub 账户、Web Session、聊天会话、消息、Turn、权限请求、事件流和审计日志。
 
@@ -387,6 +389,8 @@ Sessions support three approval modes:
 
 - The API and Worker use structured logging.
 - Session logs are split by user and session under `LOG_DIR/users/<userId>/sessions/<sessionId>/`.
+- File logs rotate at 50 MiB by default and retain 10 gzip-compressed archives. Configure
+  `LOG_ROTATE_MAX_BYTES`, `LOG_ROTATE_MAX_FILES`, and `LOG_ROTATE_COMPRESS` to change this.
 - User input, complete Agent responses, approval decisions, lifecycle events, and related activity are recorded in the database or logs.
 - SQLite stores users, GitHub accounts, Web Sessions, chat sessions, messages, Turns, permission requests, event streams, and audit logs.
 

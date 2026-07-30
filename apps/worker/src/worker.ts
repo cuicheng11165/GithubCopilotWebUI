@@ -9,7 +9,7 @@ import {
   type ApprovalScope
 } from "@app/contracts";
 import { ApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db } from "@app/db";
-import { createServiceLogger } from "@app/logging";
+import { createServiceLogger, rotateFileIfNeeded, rotationOptionsFromEnvironment } from "@app/logging";
 import {
   RepositoryRegistry,
   globRepositoryFiles,
@@ -45,6 +45,7 @@ const env = z.object({
   LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl")
 }).parse(process.env);
 const logger = createServiceLogger({ service: "worker" });
+const traceRotation = rotationOptionsFromEnvironment();
 logger.info({ timestampFormat: "ISO 8601 UTC" }, "Worker session-routed text logging ready");
 const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
 await registry.load();
@@ -76,7 +77,10 @@ async function getCopilotClient(host: string): Promise<CopilotClient> {
   const existing = copilotClients.get(key);
   if (existing) return existing;
   const traceFile = path.resolve(env.LLM_TRACE_FILE);
-  if (env.LLM_TRACE_ENABLED) await mkdir(path.dirname(traceFile), { recursive: true });
+  if (env.LLM_TRACE_ENABLED) {
+    await mkdir(path.dirname(traceFile), { recursive: true });
+    await rotateFileIfNeeded(traceFile, traceRotation);
+  }
   const client = new CopilotClient({
     mode: "copilot-cli",
     baseDirectory: key === "github.com" ? env.COPILOT_HOME : path.join(env.COPILOT_HOME, "runtimes", key),
