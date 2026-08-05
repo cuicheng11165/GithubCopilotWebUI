@@ -202,6 +202,7 @@ button { color: inherit; }
 .audit-detail { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }.audit-detail > .error-banner { margin: 16px; }
 .audit-detail-header { min-height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line); }.audit-detail-header .eyebrow { color: var(--green); margin: 0 0 4px; }.audit-detail-header h2 { margin: 0; font-size: 17px; }.audit-detail-header > div:last-child { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }.audit-detail-header > div:last-child span { background: #f2f5f2; border-radius: 999px; padding: 4px 7px; color: var(--muted); font-size: 9px; }
 .audit-messages { flex: 1; overflow-y: auto; padding: 22px max(22px, calc((100% - 760px)/2)); }.audit-message-wrap { position: relative; }.audit-message-wrap > time { display: block; margin: 0 0 5px 42px; color: #9aa29d; font-size: 9px; }.audit-placeholder { margin: auto; text-align: center; color: var(--muted); }.audit-placeholder svg { color: var(--green); }.audit-placeholder h2 { color: var(--text); font-size: 17px; margin: 10px 0 5px; }.audit-placeholder p, .audit-empty { color: var(--muted); font-size: 11px; }.audit-empty { padding: 18px; text-align: center; }
+.audit-tool-wrap > time { display: block; margin: 0 0 5px 42px; color: #9aa29d; font-size: 9px; }.audit-tool-wrap .tool-activity-group { margin-top: 0; }
 
 @media (max-width: 760px) {
   .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 15; box-shadow: var(--shadow); }

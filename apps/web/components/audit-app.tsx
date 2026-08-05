@@ -4,7 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, MessageSquareText, RefreshCw, Search, Users } from "lucide-react";
 import type { AuditSessionDetail, AuditSessionSummary } from "@app/contracts";
 import { getAuditSession, getAuditSessions } from "../lib/api";
+import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
+import { ToolActivityGroup } from "./tool-activity-group";
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
@@ -44,6 +46,7 @@ export function AuditApp() {
   }, [selectedId]);
 
   const userCount = useMemo(() => new Set(sessions.map((session) => session.user.id)).size, [sessions]);
+  const conversationItems = useMemo(() => groupConversationMessages(detail?.messages ?? []), [detail]);
 
   return <main className="audit-shell">
     <header className="audit-header">
@@ -96,7 +99,9 @@ export function AuditApp() {
             <div><span>{detail.session.repositoryName}</span><span>{detail.session.model}</span><span>{detail.session.messageCount} 条消息</span></div>
           </header>
           <div className="audit-messages">
-            {detail.messages.map((message) => <div key={message.id} className="audit-message-wrap"><time>{formatDate(message.createdAt)}</time><Message message={message} /></div>)}
+            {conversationItems.map((item) => item.kind === "message"
+              ? <div key={item.key} className="audit-message-wrap"><time>{formatDate(item.message.createdAt)}</time><Message message={item.message} /></div>
+              : <div key={item.key} className="audit-tool-wrap"><time>{formatDate(item.messages[0]?.createdAt ?? detail.session.updatedAt)}</time><ToolActivityGroup messages={item.messages} /></div>)}
             {detail.messages.length === 0 && <p className="audit-empty">这个会话还没有消息</p>}
           </div>
         </>}
