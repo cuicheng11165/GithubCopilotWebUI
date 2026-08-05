@@ -34,6 +34,7 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 ### 仓库选择与仓库上下文
 
 - 管理员在 `config/repositories.yaml` 中登记本机上的可信仓库。
+- 可通过同一配置文件开启 `/audit` 只读审计页，集中查看所有用户的完整对话；该页面不附加权限校验，默认关闭。
 - 可在该文件顶层通过 `modelBlacklist` 按模型 ID 精确屏蔽能力较弱的模型；自动模型路由已禁用。
 - 仓库可通过 `customAgentName` 绑定 `.github/agents` 或 `.claude/agents` 中的 Copilot custom agent；配置后，该仓库每次新建或恢复会话都会预选此 agent。
 - API 会返回每个启用仓库的基本信息，包括显示名称、当前分支、HEAD SHA、工作区是否有未提交改动等。
@@ -218,6 +219,7 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 主要职责：
 
 - 加载和监听 `config/repositories.yaml`。
+- 读取并热更新 `audit.enabled`；开启后提供无额外鉴权的全局对话审计页和只读接口。
 - 校验仓库 ID、显示名、绝对路径、重复路径等配置。
 - 获取 Git 分支、HEAD SHA 和 dirty 状态。
 - 扫描仓库技能目录并解析 `SKILL.md` frontmatter。
@@ -317,6 +319,7 @@ GithubCopilotWebUI is designed to provide a unified Copilot Agent entry point fo
 ### Repository Selection And Context
 
 - Administrators register trusted local repositories in `config/repositories.yaml`.
+- The same file can enable a read-only `/audit` page for reviewing every user's conversations. It has no additional authorization and is disabled by default.
 - A top-level `modelBlacklist` can hide weaker models by exact model ID; automatic model routing is disabled.
 - A repository can use `customAgentName` to bind a Copilot custom agent from `.github/agents` or `.claude/agents`; every newly created or resumed session for that repository pre-selects it.
 - The API returns metadata for each enabled repository, including display name, current branch, HEAD SHA, and dirty working tree status.
@@ -501,6 +504,7 @@ This package keeps Web, API, and Worker behavior aligned around the same busines
 Main responsibilities:
 
 - Load and watch `config/repositories.yaml`.
+- Load and hot-reload `audit.enabled`; when enabled, expose the unauthenticated read-only conversation audit surface.
 - Validate repository IDs, display names, absolute paths, duplicate paths, and related configuration.
 - Read Git branch, HEAD SHA, and dirty status.
 - Scan repository skill directories and parse `SKILL.md` frontmatter.

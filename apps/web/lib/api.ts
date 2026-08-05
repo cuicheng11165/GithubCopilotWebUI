@@ -1,4 +1,4 @@
-import type { AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
+import type { AuditSessionDetail, AuditSessionSummary, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
 
 export interface SessionDetail {
   session: ChatSession;
@@ -41,3 +41,5 @@ export const getModels = () => apiGet<ModelSummary[]>("/api/models");
 export const getSessions = () => apiGet<ChatSession[]>("/api/sessions");
 export const getSessionTrace = (id: string) => apiGet<LlmTraceEntry[]>(`/api/sessions/${id}/trace`);
 export const getSession = (id: string) => apiGet<SessionDetail>(`/api/sessions/${id}`);
+export const getAuditSessions = (search = "") => apiGet<{ total: number; sessions: AuditSessionSummary[] }>(`/api/audit/sessions?search=${encodeURIComponent(search)}`);
+export const getAuditSession = (id: string) => apiGet<AuditSessionDetail>(`/api/audit/sessions/${id}`);

@@ -136,6 +136,74 @@ app.get("/health/ready", async (_request, reply) => {
   }
 });
 
+app.get("/api/audit/status", async () => ({ enabled: registry.isAuditEnabled() }));
+
+app.get<{ Querystring: { search?: string; limit?: string; offset?: string } }>("/api/audit/sessions", async (request, reply) => {
+  if (!registry.isAuditEnabled()) return reply.code(404).send({ error: "Audit page is disabled" });
+  const search = request.query.search?.trim().slice(0, 200) ?? "";
+  const limit = Math.min(Math.max(Number.parseInt(request.query.limit ?? "100", 10) || 100, 1), 500);
+  const offset = Math.max(Number.parseInt(request.query.offset ?? "0", 10) || 0, 0);
+  const where: Prisma.ChatSessionWhereInput = search ? { OR: [
+    { title: { contains: search } },
+    { repositoryName: { contains: search } },
+    { user: { is: { login: { contains: search } } } },
+    { user: { is: { displayName: { contains: search } } } }
+  ] } : {};
+  const [sessions, total] = await db.$transaction([
+    db.chatSession.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      skip: offset,
+      take: limit,
+      include: {
+        user: { select: { id: true, login: true, displayName: true, avatarUrl: true } },
+        _count: { select: { messages: true } },
+        messages: { orderBy: { createdAt: "desc" }, take: 1, select: { content: true } }
+      }
+    }),
+    db.chatSession.count({ where })
+  ]);
+  return {
+    total,
+    sessions: sessions.map(({ user, messages, _count, ...session }) => ({
+      ...serializeSession(session),
+      user,
+      messageCount: _count.messages,
+      lastMessagePreview: messages[0]?.content.slice(0, 240) ?? null
+    }))
+  };
+});
+
+app.get<{ Params: { id: string } }>("/api/audit/sessions/:id", async (request, reply) => {
+  if (!registry.isAuditEnabled()) return reply.code(404).send({ error: "Audit page is disabled" });
+  const session = await db.chatSession.findUnique({
+    where: { id: request.params.id },
+    include: {
+      user: { select: { id: true, login: true, displayName: true, avatarUrl: true } },
+      messages: { orderBy: { createdAt: "asc" } },
+      _count: { select: { messages: true } }
+    }
+  });
+  if (!session) return reply.code(404).send({ error: "Session not found" });
+  const { user, messages, _count, ...sessionData } = session;
+  return {
+    session: {
+      ...serializeSession(sessionData),
+      user,
+      messageCount: _count.messages,
+      lastMessagePreview: messages.at(-1)?.content.slice(0, 240) ?? null
+    },
+    messages: messages.map((message) => ({
+      id: message.id,
+      sessionId: message.sessionId,
+      turnId: message.turnId,
+      role: message.role.toLowerCase(),
+      content: message.content,
+      createdAt: message.createdAt.toISOString()
+    }))
+  };
+});
+
 app.get("/api/me", async (request, reply) => {
   const auth = await authenticate(request, reply);
   if (!(auth && "user" in auth)) return;

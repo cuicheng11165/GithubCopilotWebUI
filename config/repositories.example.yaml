@@ -2,6 +2,10 @@ modelBlacklist:
   # Model IDs are matched exactly. Automatic model routing is disabled.
   - weak-model-id
 
+# Exposes /audit and its read-only APIs. No additional authorization is applied.
+audit:
+  enabled: false
+
 repositories:
   - id: example
     displayName: Example Repository

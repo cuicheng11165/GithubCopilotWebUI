@@ -5,6 +5,29 @@ import { describe, expect, it, vi } from "vitest";
 import { globRepositoryFiles, readRepositoryFile, RepositoryRegistry, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
 
 describe("repository tools", () => {
+  it("loads the audit page switch and defaults it to disabled", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const config = path.join(root, "repositories.yaml");
+    await writeFile(config, `audit:
+  enabled: true
+repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+`);
+    const registry = new RepositoryRegistry(config);
+    await registry.load();
+    expect(registry.isAuditEnabled()).toBe(true);
+
+    await writeFile(config, `repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+`);
+    await registry.load();
+    expect(registry.isAuditEnabled()).toBe(false);
+  });
+
   it("loads and deduplicates the model blacklist and rejects automatic routing", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
     const config = path.join(root, "repositories.yaml");

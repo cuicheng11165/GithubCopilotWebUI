@@ -1,3 +1,6 @@
+audit:
+  enabled: false
+
 modelBlacklist:
   - gpt-4o-mini
   - gpt-4o

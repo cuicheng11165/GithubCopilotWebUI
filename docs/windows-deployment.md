@@ -80,6 +80,13 @@ GITHUB_ALLOWED_ORGS=<允许登录的组织 slug，多个用逗号分隔>
 
 编辑 `config\repositories.yaml`。Windows 路径建议使用正斜杠：
 
+如需开放对话质量审计页，在该文件中设置以下配置并访问 `/audit`。该页面可读取所有用户的完整对话，且不做额外权限限制，请只在受信任的内网环境中开启：
+
+```yaml
+audit:
+  enabled: true
+```
+
 ```yaml
 modelBlacklist:
   - weak-model-id

@@ -13,6 +13,7 @@ function toPosixPath(value: string): string {
 }
 
 const repositoryConfigSchema = z.object({
+  audit: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
   modelBlacklist: z.array(z.string().trim().min(1).max(100))
     .default([])
     .transform((models) => [...new Set(models)]),
@@ -113,6 +114,7 @@ async function runRipgrep(repository: RepositoryConfig, args: string[]): Promise
 export class RepositoryRegistry {
   private repositories = new Map<string, RepositoryConfig>();
   private modelBlacklist = new Set<string>();
+  private auditEnabled = false;
   private watcher: FSWatcher | undefined;
   private reloadTimer: NodeJS.Timeout | undefined;
 
@@ -142,6 +144,7 @@ export class RepositoryRegistry {
 
     this.repositories = next;
     this.modelBlacklist = new Set(parsed.modelBlacklist);
+    this.auditEnabled = parsed.audit.enabled;
   }
 
   watch(onError: (error: Error) => void = console.error): void {
@@ -167,6 +170,10 @@ export class RepositoryRegistry {
 
   isModelAllowed(model: string): boolean {
     return model !== "auto" && !this.modelBlacklist.has(model);
+  }
+
+  isAuditEnabled(): boolean {
+    return this.auditEnabled;
   }
 
   get(id: string): RepositoryConfig {

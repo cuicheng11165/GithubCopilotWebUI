@@ -164,3 +164,21 @@ export interface LlmTraceEntry {
   contentCaptured: boolean;
   data: Record<string, unknown>;
 }
+
+export interface AuditUserSummary {
+  id: string;
+  login: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface AuditSessionSummary extends ChatSession {
+  user: AuditUserSummary;
+  messageCount: number;
+  lastMessagePreview: string | null;
+}
+
+export interface AuditSessionDetail {
+  session: AuditSessionSummary;
+  messages: ChatMessage[];
+}
