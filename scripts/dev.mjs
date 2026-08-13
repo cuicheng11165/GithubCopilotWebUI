@@ -15,6 +15,12 @@ process.env.WORKER_CONCURRENCY ??= "20";
 
 const pnpmCli = process.env.npm_execpath;
 const command = pnpmCli ? process.execPath : "pnpm";
+const migrateArgs = pnpmCli
+  ? [pnpmCli, "--filter", "@app/db", "migrate"]
+  : ["--filter", "@app/db", "migrate"];
+const migrate = spawnSync(command, migrateArgs, { cwd: root, env: process.env, stdio: "inherit" });
+if (migrate.status !== 0) process.exit(migrate.status ?? 1);
+
 const buildArgs = pnpmCli
   ? [pnpmCli, "--filter", "./packages/*", "build"]
   : ["--filter", "./packages/*", "build"];

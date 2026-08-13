@@ -28,6 +28,11 @@ export const repositorySummarySchema = z.object({
     description: z.string().nullable(),
     source: z.string(),
     warning: z.string().nullable()
+  })),
+  agents: z.array(z.object({
+    name: z.string(),
+    description: z.string().nullable(),
+    source: z.string()
   }))
 });
 export type RepositorySummary = z.infer<typeof repositorySummarySchema>;
@@ -37,6 +42,7 @@ export const sessionSchema = z.object({
   title: z.string(),
   repositoryId: z.string(),
   repositoryName: z.string(),
+  agent: z.string(),
   model: z.string(),
   approvalMode: approvalModeSchema,
   approvalScopes: z.array(approvalScopeSchema),
@@ -59,6 +65,7 @@ export type ChatSession = z.infer<typeof sessionSchema>;
 
 export const createSessionSchema = z.object({
   repositoryId: z.string().min(1).max(100),
+  agent: z.string().max(100).default(""),
   model: z.string().min(1).max(100),
   approvalMode: approvalModeSchema.default("interactive"),
   approvalScopes: z.array(approvalScopeSchema).default([])
@@ -71,6 +78,7 @@ export type CreateSessionInput = z.infer<typeof createSessionSchema>;
 
 export const updateSessionSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
+  agent: z.string().max(100).optional(),
   model: z.string().min(1).max(100).optional(),
   approvalMode: approvalModeSchema.optional(),
   approvalScopes: z.array(approvalScopeSchema).optional()

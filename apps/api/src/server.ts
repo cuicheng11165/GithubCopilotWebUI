@@ -12,7 +12,7 @@ import {
 } from "@app/contracts";
 import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
 import { createServiceLogger } from "@app/logging";
-import { RepositoryRegistry, getGitInfo, scanSkills } from "@app/repository-tools";
+import { RepositoryRegistry, getGitInfo, scanAgents, scanSkills } from "@app/repository-tools";
 import { authenticate, bindSessionLog, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
 import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
@@ -55,6 +55,7 @@ function serializeSession(session: DbChatSession) {
     title: session.title,
     repositoryId: session.repositoryId,
     repositoryName: session.repositoryName,
+    agent: session.agent,
     model: session.model,
     approvalMode: fromDbApprovalMode(session.approvalMode),
     approvalScopes: approvalScopesFromDb(session.approvalScopes),
@@ -238,13 +239,14 @@ app.get("/api/repositories", async (request, reply) => {
   const auth = await authenticate(request, reply);
   if (!(auth && "user" in auth)) return;
   return Promise.all(registry.list().map(async (repository) => {
-    const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
+    const [git, skills, agents] = await Promise.all([getGitInfo(repository), scanSkills(repository), scanAgents(repository)]);
     return {
       id: repository.id,
       displayName: repository.displayName,
       enabled: repository.enabled,
       ...git,
-      skills: skills.map(({ name, description, source, warning }) => ({ name, description, source, warning }))
+      skills: skills.map(({ name, description, source, warning }) => ({ name, description, source, warning })),
+      agents
     };
   }));
 });
@@ -274,13 +276,15 @@ app.post("/api/sessions", async (request, reply) => {
   if (!registry.isModelAllowed(parsed.data.model)) return reply.code(400).send({ error: "Model is not allowed" });
   let repository;
   try { repository = registry.get(parsed.data.repositoryId); } catch { return reply.code(404).send({ error: "Repository not found" }); }
-  const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
+  const [git, skills, agents] = await Promise.all([getGitInfo(repository), scanSkills(repository), scanAgents(repository)]);
+  if (parsed.data.agent && !agents.some((agent) => agent.name === parsed.data.agent)) return reply.code(400).send({ error: "Agent is not available in this repository" });
   const session = await db.chatSession.create({ data: {
     sdkSessionId: `user-${auth.user.id}-session-${randomUUID()}`,
     userId: auth.user.id,
     githubAccountId: auth.account.id,
     repositoryId: repository.id,
     repositoryName: repository.displayName,
+    agent: parsed.data.agent,
     model: parsed.data.model,
     approvalMode: toDbApprovalMode(parsed.data.approvalMode),
     approvalScopes: parsed.data.approvalScopes,
@@ -362,11 +366,17 @@ app.patch<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply
   const parsed = updateSessionSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: "Invalid update", details: parsed.error.flatten() });
   if (parsed.data.model !== undefined && !registry.isModelAllowed(parsed.data.model)) return reply.code(400).send({ error: "Model is not allowed" });
+  if (parsed.data.agent !== undefined && parsed.data.agent) {
+    const repository = registry.get(session.repositoryId);
+    const agents = await scanAgents(repository);
+    if (!agents.some((agent) => agent.name === parsed.data.agent)) return reply.code(400).send({ error: "Agent is not available in this repository" });
+  }
   const nextMode = parsed.data.approvalMode ?? fromDbApprovalMode(session.approvalMode);
   const nextScopes = parsed.data.approvalScopes ?? approvalScopesFromDb(session.approvalScopes);
   if (nextMode !== "session-scoped" && nextScopes.length > 0) return reply.code(400).send({ error: "Approval scopes are only valid in session-scoped mode" });
   const updated = await db.chatSession.update({ where: { id: session.id }, data: {
     ...(parsed.data.title !== undefined ? { title: parsed.data.title } : {}),
+    ...(parsed.data.agent !== undefined ? { agent: parsed.data.agent } : {}),
     ...(parsed.data.model !== undefined ? { model: parsed.data.model } : {}),
     ...(parsed.data.approvalMode !== undefined ? { approvalMode: toDbApprovalMode(parsed.data.approvalMode) } : {}),
     ...(parsed.data.approvalScopes !== undefined ? { approvalScopes: parsed.data.approvalScopes } : {})
