@@ -46,7 +46,7 @@ function statusName(value: string): "idle" | "queued" | "running" | "waiting-app
 
 function approvalScopesFromDb(value: Prisma.JsonValue): ApprovalScope[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((scope): scope is ApprovalScope => scope === "shell" || scope === "url" || scope === "private-script");
+  return value.filter((scope): scope is ApprovalScope => scope === "shell" || scope === "url" || scope === "private-script" || scope === "mcp");
 }
 
 function serializeSession(session: DbChatSession) {
