@@ -1,0 +1,1 @@
+ALTER TABLE "ChatSession" ADD COLUMN "agent" TEXT NOT NULL DEFAULT '';

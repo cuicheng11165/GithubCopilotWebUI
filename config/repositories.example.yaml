@@ -10,8 +10,4 @@ repositories:
   - id: example
     displayName: Example Repository
     path: /absolute/path/to/repository
-    # Optional: pre-select this repository custom agent for every conversation.
-    # This must exactly match the `name` field in the agent file's frontmatter.
-    # Quote names containing spaces or special YAML characters.
-    customAgentName: "Gao Q&A"
     enabled: true

@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { globRepositoryFiles, readRepositoryFile, RepositoryRegistry, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
+import { globRepositoryFiles, readRepositoryFile, RepositoryRegistry, scanAgents, scanSkills, searchRepository, viewRepositoryFile, type RepositoryConfig } from "./index.js";
 
 describe("repository tools", () => {
   it("loads the audit page switch and defaults it to disabled", async () => {
@@ -47,31 +47,12 @@ repositories:
     expect(registry.isModelAllowed("auto")).toBe(false);
   });
 
-  it("loads an optional repository custom agent name", async () => {
+  it("discovers repository agents from agent directories", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
-    const config = path.join(root, "repositories.yaml");
-    await writeFile(config, `repositories:
-  - id: test
-    displayName: Test
-    path: ${JSON.stringify(root)}
-    customAgentName: Gao Q&A
-`);
-    const registry = new RepositoryRegistry(config);
-    await registry.load();
-    expect(registry.get("test").customAgentName).toBe("Gao Q&A");
-  });
-
-  it("rejects an empty repository custom agent name", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
-    const config = path.join(root, "repositories.yaml");
-    await writeFile(config, `repositories:
-  - id: test
-    displayName: Test
-    path: ${JSON.stringify(root)}
-    customAgentName: "   "
-`);
-    const registry = new RepositoryRegistry(config);
-    await expect(registry.load()).rejects.toThrow();
+    await mkdir(path.join(root, ".github/agents"), { recursive: true });
+    await writeFile(path.join(root, ".github/agents/gao.agent.md"), "---\nname: Gao Q&A\ndescription: Answers project questions\n---\nPrompt");
+    const repository: RepositoryConfig = { id: "test", displayName: "Test", path: root, canonicalPath: await realpath(root), enabled: true };
+    expect(await scanAgents(repository)).toEqual([{ name: "Gao Q&A", description: "Answers project questions", source: ".github/agents/gao.agent.md" }]);
   });
 
   it("discovers skills by documented precedence", async () => {

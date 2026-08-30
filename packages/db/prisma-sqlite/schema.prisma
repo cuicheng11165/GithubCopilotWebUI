@@ -66,6 +66,7 @@ model ChatSession {
   repositoryId       String
   repositoryName     String
   title              String              @default("New chat")
+  agent              String              @default("")
   model              String              @default("auto")
   approvalMode       String              @default("INTERACTIVE")
   approvalScopes     Json                @default("[]")

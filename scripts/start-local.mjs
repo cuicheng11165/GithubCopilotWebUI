@@ -1,6 +1,6 @@
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,6 +15,14 @@ for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_RO
 process.env.NODE_ENV = "production";
 process.env.WORKER_CONCURRENCY ??= "20";
 process.env.API_INTERNAL_URL ??= "http://127.0.0.1:4000";
+
+const pnpmCli = process.env.npm_execpath;
+const migrateCommand = pnpmCli ? process.execPath : "pnpm";
+const migrateArgs = pnpmCli
+  ? [pnpmCli, "--filter", "@app/db", "migrate"]
+  : ["--filter", "@app/db", "migrate"];
+const migrate = spawnSync(migrateCommand, migrateArgs, { cwd: root, env: process.env, stdio: "inherit" });
+if (migrate.status !== 0) process.exit(migrate.status ?? 1);
 
 const webBuild = path.join(root, "apps/web/.next");
 const webStandalone = path.join(webBuild, "standalone");

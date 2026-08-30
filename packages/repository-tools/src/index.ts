@@ -21,11 +21,6 @@ const repositoryConfigSchema = z.object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-_]{0,99}$/),
     displayName: z.string().min(1).max(120),
     path: z.string().min(1),
-    customAgentName: z.string()
-      .trim()
-      .min(1)
-      .max(100)
-      .optional(),
     enabled: z.boolean().default(true)
   })).min(1)
 });
@@ -35,7 +30,6 @@ export interface RepositoryConfig {
   displayName: string;
   path: string;
   canonicalPath: string;
-  customAgentName?: string;
   enabled: boolean;
 }
 
@@ -54,7 +48,14 @@ export interface SkillInfo {
   contentHash: string;
 }
 
+export interface AgentInfo {
+  name: string;
+  description: string | null;
+  source: string;
+}
+
 const SKILL_ROOTS = [".github/skills", ".agents/skills", ".claude/skills"] as const;
+const AGENT_ROOTS = [".github/agents", ".agents/agents", ".claude/agents"] as const;
 const EXCLUDED_SEGMENTS = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
 
 function isWithin(root: string, candidate: string): boolean {
@@ -133,10 +134,8 @@ export class RepositoryRegistry {
       if (!(await stat(canonicalPath)).isDirectory()) throw new Error(`Repository ${item.id} path is not a directory`);
       if (next.has(item.id)) throw new Error(`Duplicate repository id: ${item.id}`);
       if (paths.has(canonicalPath)) throw new Error(`Duplicate repository path: ${canonicalPath}`);
-      const { customAgentName, ...baseItem } = item;
       next.set(item.id, {
-        ...baseItem,
-        ...(customAgentName ? { customAgentName } : {}),
+        ...item,
         canonicalPath
       });
       paths.add(canonicalPath);
@@ -209,6 +208,32 @@ function parseFrontmatter(content: string): { name: string | undefined; descript
     YAML.parse(content.slice(4, end)) ?? {}
   );
   return { name: parsed.name, description: parsed.description };
+}
+
+export async function scanAgents(repository: RepositoryConfig): Promise<AgentInfo[]> {
+  const agents: AgentInfo[] = [];
+  const seenNames = new Set<string>();
+  for (const root of AGENT_ROOTS) {
+    const absoluteRoot = path.join(repository.canonicalPath, root);
+    let entries;
+    try { entries = await readdir(absoluteRoot, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".md")) continue;
+      const source = toPosixPath(path.join(root, entry.name));
+      try {
+        const content = await readFile(path.join(absoluteRoot, entry.name), "utf8");
+        const frontmatter = parseFrontmatter(content);
+        const fallbackName = entry.name.replace(/\.agent\.md$/i, "").replace(/\.md$/i, "");
+        const name = frontmatter.name?.trim() || fallbackName;
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+        agents.push({ name, description: frontmatter.description?.trim() || null, source });
+      } catch {
+        continue;
+      }
+    }
+  }
+  return agents;
 }
 
 export async function scanSkills(repository: RepositoryConfig): Promise<SkillInfo[]> {

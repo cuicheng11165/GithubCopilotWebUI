@@ -446,11 +446,9 @@ async function runTurn(job: TurnJobLike) {
       tools,
       skillDirectories,
       disabledSkills: [],
-      // Repository config discovery is required for a pre-selected project
-      // custom agent under .github/agents or .claude/agents. Keep it disabled
-      // for repositories that have not explicitly opted in.
-      enableConfigDiscovery: Boolean(repository.customAgentName),
-      ...(repository.customAgentName ? { agent: repository.customAgentName } : {}),
+      // Custom agents are discovered from the selected repository and chosen per session.
+      enableConfigDiscovery: true,
+      ...(turn.session.agent ? { agent: turn.session.agent } : {}),
       enableSkills: true,
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },

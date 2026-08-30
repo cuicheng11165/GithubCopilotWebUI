@@ -139,8 +139,16 @@ button { color: inherit; }
 .composer { background: #fff; border: 1px solid #dce2dd; box-shadow: 0 7px 28px rgba(36,50,41,.11); border-radius: 14px; padding: 11px 11px 8px 15px; }
 .composer:focus-within { border-color: #a8c9b6; box-shadow: 0 7px 30px rgba(31,122,80,.12); }
 .composer textarea { width: 100%; border: 0; outline: 0; resize: none; min-height: 42px; max-height: 150px; color: var(--text); background: transparent; line-height: 1.5; }
-.composer-bottom { display: flex; align-items: center; justify-content: space-between; }
-.composer-bottom span, .composer-note { color: #8b948e; font-size: 10px; }
+.composer-bottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+.composer-controls { min-width: 0; display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.composer-select { min-width: 0; height: 28px; display: inline-flex; align-items: center; gap: 4px; border-radius: 7px; padding: 0 5px 0 7px; color: #667069; cursor: pointer; }
+.composer-select:hover { background: #f1f4f1; color: var(--text); }
+.composer-select:focus-within { outline: 2px solid #9dcab2; outline-offset: -1px; }
+.composer-select select { min-width: 0; max-width: 170px; height: 100%; border: 0; outline: 0; appearance: none; background: transparent; color: inherit; cursor: pointer; font-size: 11px; font-weight: 600; }
+.composer-select.agent-select { color: #3f4b43; }
+.composer-select.danger { color: var(--red); background: #fff1f0; }
+.composer-select > svg { flex: 0 0 auto; pointer-events: none; }
+.composer-note { color: #8b948e; font-size: 10px; }
 .send-button { width: 31px; height: 31px; border: 0; border-radius: 9px; display: grid; place-items: center; background: var(--green); color: white; cursor: pointer; }
 .send-button:disabled { opacity: .35; cursor: default; }
 .send-button.stop { background: #303832; }
@@ -210,6 +218,8 @@ button { color: inherit; }
   .mobile-only { display: grid; }
   .messages { padding-left: 16px; padding-right: 16px; }
   .composer-wrap { padding-left: 12px; padding-right: 12px; }
+  .composer-select select { max-width: 110px; }
+  .composer-select:nth-child(3) { display: none; }
   .header-controls .mode-pill { display: none; }
   .permission-card { margin-left: 0; }
   .tool-activity-group { margin-left: 0; }
