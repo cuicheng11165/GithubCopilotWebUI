@@ -3,7 +3,7 @@ import { z } from "zod";
 export const approvalModeSchema = z.enum(["interactive", "session-scoped", "allow-all"]);
 export type ApprovalMode = z.infer<typeof approvalModeSchema>;
 
-export const approvalScopeSchema = z.enum(["shell", "url", "private-script"]);
+export const approvalScopeSchema = z.enum(["shell", "url", "private-script", "mcp"]);
 export type ApprovalScope = z.infer<typeof approvalScopeSchema>;
 
 export function shouldAutoApprove(mode: ApprovalMode, scopes: readonly ApprovalScope[], scope: ApprovalScope): boolean {

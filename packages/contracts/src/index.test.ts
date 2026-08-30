@@ -8,4 +8,5 @@ describe("approval policy", () => {
     expect(shouldAutoApprove("session-scoped", ["url"], "shell")).toBe(false);
   });
   it("auto-approves supported tools in allow-all", () => expect(shouldAutoApprove("allow-all", [], "private-script")).toBe(true));
+  it("supports session-scoped MCP approval", () => expect(shouldAutoApprove("session-scoped", ["mcp"], "mcp")).toBe(true));
 });

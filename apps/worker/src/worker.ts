@@ -109,7 +109,7 @@ let shuttingDown = false;
 
 function approvalScopesFromDb(value: Prisma.JsonValue): ApprovalScope[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((scope): scope is ApprovalScope => scope === "shell" || scope === "url" || scope === "private-script");
+  return value.filter((scope): scope is ApprovalScope => scope === "shell" || scope === "url" || scope === "private-script" || scope === "mcp");
 }
 
 function decryptToken(value: string): string {
@@ -241,6 +241,29 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
 function permissionHandler(sessionId: string, turnId: string) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
     if (request.kind === "write") return { kind: "reject", feedback: "Repository writes are disabled by policy" };
+    if (request.kind === "shell") {
+      const approved = await waitForPermission(sessionId, turnId, "shell", request.intention, request.fullCommandText, {
+        command: request.fullCommandText,
+        commands: request.commands,
+        possiblePaths: request.possiblePaths,
+        possibleUrls: request.possibleUrls,
+        hasWriteFileRedirection: request.hasWriteFileRedirection,
+        warning: request.warning
+      });
+      return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this shell request" };
+    }
+    if (request.kind === "mcp") {
+      const display = `${request.serverName}: ${request.toolTitle || request.toolName}`;
+      const intention = `Call MCP tool ${request.toolName} on ${request.serverName}`;
+      const approved = await waitForPermission(sessionId, turnId, "mcp", intention, display, {
+        serverName: request.serverName,
+        toolName: request.toolName,
+        toolTitle: request.toolTitle,
+        readOnly: request.readOnly,
+        args: request.args ?? {}
+      });
+      return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this MCP request" };
+    }
     if (request.kind !== "custom-tool") return { kind: "reject", feedback: `Tool permission '${request.kind}' is not available` };
     const shellTools = new Set(["bash", "apply_patch", "problems", "runTests"]);
     const scope: ApprovalScope | undefined = shellTools.has(request.toolName) ? "shell" : request.toolName === "web_fetch" ? "url" : request.toolName === "run_private_script" ? "private-script" : undefined;
