@@ -20,7 +20,14 @@ vi.mock("@app/db", () => ({
       findUnique: mocks.gitHubAccountFindUnique,
       update: mocks.gitHubAccountUpdate
     }
-  }
+  },
+  createPrismaGitHubTokenStore: () => ({
+    find: (id: string) => mocks.gitHubAccountFindUnique({ where: { id } }),
+    claim: async () => true,
+    save: async () => true,
+    saveIfRefreshTokenMatches: async () => true,
+    release: async () => {}
+  })
 }));
 
 process.env.DATABASE_URL = "file:./data/auth-unit.db";

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bot, ChevronDown, Github, LogOut, Menu, Pencil, Plus, Send, Shield, ShieldAlert, Square, Trash2, X } from "lucide-react";
 import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
 import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions, getSessionTrace } from "../lib/api";
+import { createStreamCursorState, eventTurnNotice, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice, type StreamEventInput } from "../lib/stream-state";
 import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
@@ -23,6 +24,8 @@ export function ChatApp() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draft, setDraft] = useState("");
   const [streaming, setStreaming] = useState("");
+  const [streamingLive, setStreamingLive] = useState(false);
+  const [turnNotice, setTurnNotice] = useState<{ tone: "warning" | "error"; message: string } | null>(null);
   const [activeTool, setActiveTool] = useState<{ name: string; turnId: string | null } | null>(null);
   const [runningTurnId, setRunningTurnId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,58 +56,91 @@ export function ChatApp() {
   })(); }, []);
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); return; }
+    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setTurnNotice(null); setStreaming(""); setStreamingLive(false); setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); return; }
     setStreaming("");
+    setStreamingLive(false);
+    setTurnNotice(null);
     setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false);
-    void getSession(activeId).then((detail) => { setMessages(detail.messages); setPermissions(detail.permissions); setSkills(detail.skills); }).catch((caught) => setError(caught instanceof Error ? caught.message : "Failed to load session"));
-    const events = new EventSource(`/api/sessions/${activeId}/events`, { withCredentials: true });
-    const handle = (raw: Event) => {
-      const payload = JSON.parse((raw as MessageEvent<string>).data) as { kind: string; data: Record<string, unknown>; turnId: string | null };
-      if (payload.kind === "assistant.delta") setStreaming((value) => value + String(payload.data.deltaContent ?? ""));
-      if (payload.kind === "assistant.message") {
-        const content = String(payload.data.content ?? ""); setStreaming("");
-        setMessages((current) => current.some((message) => message.turnId === payload.turnId && message.role === "assistant") ? current : [...current, { id: crypto.randomUUID(), sessionId: activeId, turnId: payload.turnId, role: "assistant", content, createdAt: new Date().toISOString() }]);
-      }
-      if (payload.kind === "tool.completed") {
-        const id = String(payload.data.messageId ?? crypto.randomUUID());
-        const content = String(payload.data.content ?? JSON.stringify(payload.data, null, 2));
-        setMessages((current) => current.some((message) => message.id === id) ? current : [...current, { id, sessionId: activeId, turnId: payload.turnId, role: "tool", content, createdAt: new Date().toISOString() }]);
-        setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
-      }
-      if (payload.kind === "tool.started") setActiveTool({ name: String(payload.data.toolName ?? payload.data.name ?? "Agent tool"), turnId: payload.turnId });
-      if (payload.kind === "usage.updated") {
-        setSessions((current) => current.map((item) => item.id === activeId ? {
-          ...item,
-          usage: {
-            inputTokens: Number(payload.data.inputTokens ?? 0),
-            outputTokens: Number(payload.data.outputTokens ?? 0),
-            cacheReadTokens: Number(payload.data.cacheReadTokens ?? 0),
-            cacheWriteTokens: Number(payload.data.cacheWriteTokens ?? 0),
-            reasoningTokens: Number(payload.data.reasoningTokens ?? 0),
-            aiCredits: typeof payload.data.aiCredits === "number" ? payload.data.aiCredits : null
-          }
-        } : item));
-      }
-      if (payload.kind === "permission.requested") setPermissions((current) => [...current.filter((item) => item.id !== payload.data.id), payload.data as unknown as PermissionRequest]);
-      if (payload.kind === "permission.completed") setPermissions((current) => current.filter((item) => item.id !== payload.data.requestId));
-      if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
-      if (payload.kind === "turn.started") {
-        setRunningTurnId(payload.turnId);
-        setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
-      }
-      if (payload.kind === "permission.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
-      if (["turn.completed", "turn.failed", "turn.stopped"].includes(payload.kind)) {
-        setRunningTurnId((current) => current === payload.turnId ? null : current);
-        setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
-      }
-      if (["turn.completed", "turn.failed", "turn.stopped", "session.updated"].includes(payload.kind)) void refreshSessions();
+    let closed = false;
+    let events: EventSource | null = null;
+    const stream = createStreamCursorState();
+    const applyStream = (payload: StreamEventInput) => {
+      const next = reduceStreamEvent(stream, payload);
+      if (next.lastCursor === stream.lastCursor) return false;
+      stream.lastCursor = next.lastCursor;
+      stream.streaming = next.streaming;
+      stream.streamingTurnId = next.streamingTurnId;
+      stream.streamingLive = next.streamingLive;
+      stream.sealedTurnIds = next.sealedTurnIds;
+      setStreaming(next.streaming);
+      setStreamingLive(next.streamingLive);
+      return true;
     };
-    ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "usage.updated", "turn.completed", "turn.failed", "turn.stopped", "session.updated"].forEach((kind) => events.addEventListener(kind, handle));
-    return () => events.close();
+    void getSession(activeId).then((detail) => {
+      if (closed) return;
+      setMessages(detail.messages);
+      setPermissions(detail.permissions);
+      setSkills(detail.skills);
+      setTurnNotice(visibleTurnNotice(detail.turns ?? []));
+      for (const id of sealTurnsWithAssistantMessages(detail.messages)) stream.sealedTurnIds.add(id);
+      events = new EventSource(`/api/sessions/${activeId}/events`, { withCredentials: true });
+      if (closed) { events.close(); return; }
+      const handle = (raw: Event) => {
+        const payload = JSON.parse((raw as MessageEvent<string>).data) as StreamEventInput & { data: Record<string, unknown> };
+        if (!applyStream(payload)) return;
+        const data = payload.data ?? {};
+        if (payload.kind === "assistant.message") {
+          const content = String(data.content ?? "");
+          setMessages((current) => current.some((message) => message.turnId === payload.turnId && message.role === "assistant") ? current : [...current, { id: crypto.randomUUID(), sessionId: activeId, turnId: payload.turnId, role: "assistant", content, createdAt: new Date().toISOString() }]);
+        }
+        if (payload.kind === "tool.completed") {
+          const id = String(data.messageId ?? crypto.randomUUID());
+          const content = String(data.content ?? JSON.stringify(data, null, 2));
+          setMessages((current) => current.some((message) => message.id === id) ? current : [...current, { id, sessionId: activeId, turnId: payload.turnId, role: "tool", content, createdAt: new Date().toISOString() }]);
+          setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
+        }
+        if (payload.kind === "tool.started") setActiveTool({ name: String(data.toolName ?? data.name ?? "Agent tool"), turnId: payload.turnId });
+        if (payload.kind === "usage.updated") {
+          setSessions((current) => current.map((item) => item.id === activeId ? {
+            ...item,
+            usage: {
+              inputTokens: Number(data.inputTokens ?? 0),
+              outputTokens: Number(data.outputTokens ?? 0),
+              cacheReadTokens: Number(data.cacheReadTokens ?? 0),
+              cacheWriteTokens: Number(data.cacheWriteTokens ?? 0),
+              reasoningTokens: Number(data.reasoningTokens ?? 0),
+              aiCredits: typeof data.aiCredits === "number" ? data.aiCredits : null
+            }
+          } : item));
+        }
+        if (payload.kind === "permission.requested") setPermissions((current) => [...current.filter((item) => item.id !== data.id), data as unknown as PermissionRequest]);
+        if (payload.kind === "permission.completed") setPermissions((current) => current.filter((item) => item.id !== data.requestId));
+        if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
+        if (payload.kind === "turn.started") {
+          setTurnNotice(null);
+          setRunningTurnId(payload.turnId);
+          setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
+        }
+        if (payload.kind === "permission.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
+        const notice = eventTurnNotice(payload.kind, data.error);
+        if (notice) {
+          setTurnNotice(notice);
+          setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "error" } : item));
+        }
+        if (payload.kind === "turn.completed") setTurnNotice(null);
+        if (["turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted"].includes(payload.kind)) {
+          setRunningTurnId((current) => current === payload.turnId ? null : current);
+          setActiveTool((current) => current?.turnId === payload.turnId ? null : current);
+        }
+        if (["turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted", "session.updated"].includes(payload.kind)) void refreshSessions();
+      };
+      ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "usage.updated", "turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted", "session.updated"].forEach((kind) => events?.addEventListener(kind, handle));
+    }).catch((caught) => { if (!closed) setError(caught instanceof Error ? caught.message : "Failed to load session"); });
+    return () => { closed = true; events?.close(); };
   }, [activeId, refreshSessions]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streaming, permissions, activeTool]);
+  }, [messages, streaming, streamingLive, permissions, activeTool, turnNotice]);
 
   if (!me) return <div className="app-loading"><div className="brand-mark"><Bot size={24} /></div><span>Loading workspace…</span></div>;
 
@@ -116,7 +152,7 @@ export function ChatApp() {
   };
   const send = async () => {
     const content = draft.trim(); if (!content || !active) return;
-    setDraft(""); setStreaming("");
+    setDraft(""); setStreaming(""); setStreamingLive(false); setTurnNotice(null);
     setMessages((current) => [...current, { id: crypto.randomUUID(), sessionId: active.id, turnId: null, role: "user", content, createdAt: new Date().toISOString() }]);
     try { await apiWrite(`/api/sessions/${active.id}/messages`, me.csrfToken, "POST", { content }, { "Idempotency-Key": crypto.randomUUID() }); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Message could not be sent"); }
@@ -161,13 +197,14 @@ export function ChatApp() {
       {!active ? <div className="empty-state"><div className="empty-icon"><Bot size={28} /></div><h1>Start with a repository</h1><p>Ask Copilot about live code, run approved commands, and use private repository skills.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={17} /> New chat</button></div> : <>
         {active.approvalMode === "allow-all" && <div className="allow-all-banner"><ShieldAlert size={15} /> Allow all is active. Commands, public URL requests, and private scripts run without approval.</div>}
         {active.approvalMode === "session-scoped" && <div className="session-scope-bar"><span>Auto approve for this session:</span>{(["shell", "url", "private-script", "mcp"] as ApprovalScope[]).map((scope) => <label key={scope}><input type="checkbox" checked={active.approvalScopes.includes(scope)} onChange={() => void updateSession(active, { approvalScopes: active.approvalScopes.includes(scope) ? active.approvalScopes.filter((item) => item !== scope) : [...active.approvalScopes, scope] })} />{scope === "private-script" ? "Private scripts" : scope === "url" ? "URL" : scope === "mcp" ? "MCP tools" : "Shell"}</label>)}</div>}
+        {turnNotice && <div className={`turn-notice ${turnNotice.tone}`} role="status">{turnNotice.message}</div>}
         <div className="messages"><div className="context-strip"><span>{skills.length} skills loaded</span><span title={`Input ${active.usage.inputTokens.toLocaleString()} · Output ${active.usage.outputTokens.toLocaleString()} · Cache read ${active.usage.cacheReadTokens.toLocaleString()} · Cache write ${active.usage.cacheWriteTokens.toLocaleString()} · Reasoning ${active.usage.reasoningTokens.toLocaleString()}`}>{(active.usage.inputTokens + active.usage.outputTokens).toLocaleString()} tokens</span>{active.usage.aiCredits !== null && <span>{active.usage.aiCredits.toLocaleString(undefined, { maximumFractionDigits: 6 })} AI credits</span>}<button className="trace-toggle" onClick={() => void toggleTrace()}><Activity size={13} /> LLM trace</button>{skills.filter((skill) => skill.warning).map((skill) => <span className="skill-warning" key={skill.name}>{skill.name}: {skill.warning}</span>)}</div>
           {traceOpen && <div className="trace-panel"><div className="trace-panel-header"><strong>LLM trace</strong><span>{trace.length} events</span></div>{traceLoading ? <p>Loading trace…</p> : trace.length === 0 ? <p>No trace events were captured. Enable LLM_TRACE_ENABLED and restart the Worker.</p> : trace.map((entry) => <details key={entry.cursor} className="trace-entry"><summary><time>{new Date(entry.capturedAt).toLocaleTimeString()}</time><code>{entry.eventType}</code>{entry.contentCaptured && <span>content</span>}</summary><pre>{JSON.stringify(entry.data, null, 2)}</pre></details>)}</div>}
           {conversationItems.map((item) => item.kind === "message"
           ? <Message key={item.key} message={item.message} />
           : <ToolActivityGroup key={item.key} messages={item.messages} isRunning={item.turnId !== null && item.turnId === activeToolTurnId && !completedTurnIds.has(item.turnId)} runningTool={item.turnId === activeTool?.turnId ? activeTool.name : null} />)}
           {activeToolTurnId !== null && !hasActiveToolGroup && !completedTurnIds.has(activeToolTurnId) && <ToolActivityGroup messages={[]} isRunning runningTool={activeTool?.name ?? null} />}
-          {streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streaming + " ▍", createdAt: new Date().toISOString() }} />}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
+          {streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streamingLive ? `${streaming} ▍` : streaming, createdAt: new Date().toISOString() }} />}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
         <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${active.repositoryName}…`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><div className="composer-controls"><label className="composer-select agent-select"><Bot size={14} /><select aria-label="Agent" value={active.agent} onChange={(event) => void updateSession(active, { agent: event.target.value })}><option value="">Default agent</option>{activeRepository?.agents.map((agent) => <option key={agent.name} value={agent.name}>{agent.name}</option>)}</select><ChevronDown size={12} /></label><label className="composer-select"><select aria-label="Model" value={active.model} onChange={(event) => void updateSession(active, { model: event.target.value })}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><ChevronDown size={12} /></label><label className={`composer-select ${active.approvalMode === "allow-all" ? "danger" : ""}`}><Shield size={13} /><select aria-label="Approval mode" value={active.approvalMode} onChange={(event) => void updateSession(active, { approvalMode: event.target.value, approvalScopes: event.target.value === "session-scoped" ? active.approvalScopes : [] })}><option value="interactive">Default approvals</option><option value="session-scoped">Session approvals</option><option value="allow-all">Allow all</option></select><ChevronDown size={12} /></label></div>{["running", "queued", "waiting-approval"].includes(active.status) ? <button className="send-button stop" aria-label="Stop" onClick={() => void apiWrite(`/api/sessions/${active.id}/stop`, me.csrfToken, "POST")}><Square size={14} fill="currentColor" /></button> : <button className="send-button" aria-label="Send" disabled={!draft.trim()} onClick={() => void send()}><Send size={17} /></button>}</div></div><p className="composer-note">Local execution · Copilot can make mistakes. Review changes and commands.</p></div>
       </>}
     </section>

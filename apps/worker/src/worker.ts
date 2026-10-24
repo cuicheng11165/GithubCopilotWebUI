@@ -1,4 +1,4 @@
-import { createDecipheriv, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, rm, symlink } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -8,7 +8,7 @@ import {
   type ApprovalMode as ContractApprovalMode,
   type ApprovalScope
 } from "@app/contracts";
-import { ApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db } from "@app/db";
+import { ApprovalMode, createPrismaGitHubTokenStore, db, exchangeOAuthRefreshToken, expiredForeignLeaseWhere, MessageRole, PermissionStatus, Prisma, resolveGitHubAccessToken, SessionStatus, TurnStatus } from "@app/db";
 import { createServiceLogger, rotateFileIfNeeded, rotationOptionsFromEnvironment } from "@app/logging";
 import {
   RepositoryRegistry,
@@ -22,10 +22,13 @@ import {
   viewRepositoryFile,
   type RepositoryConfig
 } from "@app/repository-tools";
-import { bearerAuthorizationMatches, decodeTokenEncryptionKey, parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
+import { bearerAuthorizationMatches, parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
 import { sanitizeSdkEventForLog, sanitizeToolEventForLog } from "./tool-event-log.js";
 import { lastAssistantContent } from "./assistant-response.js";
 import { resolvePythonLauncher } from "./platform.js";
+import { postSandboxJson } from "./sandbox-client.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
+import { INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sessionStatusAfterInterrupt, TurnTimeoutError, waitForTurn } from "./turn-control.js";
 import { z } from "zod";
 
 const booleanEnvironmentValue = z.enum(["true", "false"]).default("false").transform((value) => value === "true");
@@ -43,10 +46,26 @@ const workerEnvSchema = z.object({
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
   LLM_TRACE_ENABLED: booleanEnvironmentValue,
   LLM_TRACE_CAPTURE_CONTENT: booleanEnvironmentValue,
-  LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl")
+  LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl"),
+  TURN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(24 * 60 * 60 * 1000).default(15 * 60 * 1000),
+  TURN_LEASE_MS: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
+  COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
+  SANDBOX_REQUEST_TIMEOUT_BUFFER_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
+  API_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
+  API_HOST: z.string().default("127.0.0.1"),
+  API_PORT: z.coerce.number().int().positive().default(4000),
+  WORKER_ID: z.string().min(1).optional().or(z.literal("")),
+  GITHUB_CLIENT_ID: z.string().optional().or(z.literal("")),
+  GITHUB_CLIENT_SECRET: z.string().optional().or(z.literal("")),
+  GHE_CLIENT_ID: z.string().optional().or(z.literal("")),
+  GHE_CLIENT_SECRET: z.string().optional().or(z.literal(""))
 });
 const env = parseEnv(workerEnvSchema);
-const tokenEncryptionKey = decodeTokenEncryptionKey(env.TOKEN_ENCRYPTION_KEY);
+const workerId = env.WORKER_ID || randomUUID();
+const leaseRenewEveryMs = Math.max(1_000, Math.floor(env.TURN_LEASE_MS / 3));
+const sandboxTimeoutMs = sandboxRequestTimeoutMs(env.COMMAND_TIMEOUT_SECONDS, env.SANDBOX_REQUEST_TIMEOUT_BUFFER_SECONDS);
+const githubTokenStore = createPrismaGitHubTokenStore(db);
+const ownedTurnIds = new Set<string>();
 const logger = createServiceLogger({ service: "worker" });
 const traceRotation = rotationOptionsFromEnvironment();
 logger.info({ timestampFormat: "ISO 8601 UTC" }, "Worker session-routed text logging ready");
@@ -116,15 +135,78 @@ function approvalScopesFromDb(value: Prisma.JsonValue): ApprovalScope[] {
 }
 
 function decryptToken(value: string): string {
-  const [version, iv, tag, encrypted] = value.split(".");
-  if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Unsupported encrypted token format");
-  const decipher = createDecipheriv("aes-256-gcm", tokenEncryptionKey, Buffer.from(iv, "base64url"));
-  decipher.setAuthTag(Buffer.from(tag, "base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
+  return decryptSecret(env.TOKEN_ENCRYPTION_KEY, value);
+}
+
+function encryptToken(value: string): string {
+  return encryptSecret(env.TOKEN_ENCRYPTION_KEY, value);
+}
+
+function apiBaseUrl(): string {
+  if (env.API_INTERNAL_URL) return env.API_INTERNAL_URL;
+  const host = env.API_HOST === "0.0.0.0" || env.API_HOST === "::" ? "127.0.0.1" : env.API_HOST;
+  return `http://${host}:${env.API_PORT}`;
+}
+
+function oauthClientFor(account: { provider: string; host: string }) {
+  if (account.provider === "github") {
+    if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) throw new Error("GitHub OAuth client is not configured");
+    return { webBaseUrl: "https://github.com", clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET };
+  }
+  if (account.provider === "ghe") {
+    if (!env.GHE_CLIENT_ID || !env.GHE_CLIENT_SECRET || !account.host) throw new Error("GitHub Enterprise OAuth client is not configured");
+    return { webBaseUrl: `https://${account.host}`, clientId: env.GHE_CLIENT_ID, clientSecret: env.GHE_CLIENT_SECRET };
+  }
+  throw new Error("OAuth provider is no longer configured");
+}
+
+async function accessTokenForAccount(accountId: string, skewMs: number): Promise<string> {
+  return resolveGitHubAccessToken({
+    accountId,
+    claimOwner: workerId,
+    skewMs,
+    store: githubTokenStore,
+    decrypt: decryptToken,
+    encrypt: encryptToken,
+    exchange: async (refreshToken, account) => {
+      const client = oauthClientFor(account);
+      return exchangeOAuthRefreshToken({ ...client, refreshToken });
+    }
+  });
+}
+
+const pendingNotifies = new Set<string>();
+let notifyTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleEventNotify(sessionId: string) {
+  pendingNotifies.add(sessionId);
+  if (notifyTimer) return;
+  notifyTimer = setTimeout(() => {
+    notifyTimer = undefined;
+    const sessionIds = [...pendingNotifies];
+    pendingNotifies.clear();
+    void notifySessionEvents(sessionIds);
+  }, 50);
+  notifyTimer.unref?.();
+}
+
+async function notifySessionEvents(sessionIds: string[]) {
+  if (sessionIds.length === 0) return;
+  try {
+    await fetch(`${apiBaseUrl()}/internal/events/notify`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.WORKER_CONTROL_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionIds }),
+      signal: AbortSignal.timeout(1_000)
+    });
+  } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : "notify failed" }, "API event notify failed; polling will catch up");
+  }
 }
 
 async function appendEvent(sessionId: string, turnId: string | null, kind: string, data: Record<string, unknown>) {
   await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
+  scheduleEventNotify(sessionId);
 }
 
 const tracedSdkEvents = new Set([
@@ -149,16 +231,14 @@ function traceEventData(event: { type: string; data: Record<string, unknown> }):
   return Object.fromEntries(Object.entries(sanitized).filter(([key]) => metadataKeys.has(key)));
 }
 
-async function sandboxRequest<T>(pathname: string, body?: unknown): Promise<T> {
-  const init: RequestInit = {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.SANDBOX_RUNNER_TOKEN}`, "Content-Type": "application/json" }
-  };
-  if (body !== undefined) init.body = JSON.stringify(body);
-  const response = await fetch(`${env.SANDBOX_RUNNER_URL}${pathname}`, init);
-  const result = await response.json() as T & { error?: string };
-  if (!response.ok) throw new Error(result.error ?? `Sandbox runner returned ${response.status}`);
-  return result;
+async function sandboxRequest<T>(pathname: string, body?: unknown, timeoutMs = sandboxTimeoutMs): Promise<T> {
+  return postSandboxJson<T>({
+    baseUrl: env.SANDBOX_RUNNER_URL,
+    token: env.SANDBOX_RUNNER_TOKEN,
+    pathname,
+    ...(body !== undefined ? { body } : {}),
+    timeoutMs
+  });
 }
 
 async function prepareSkillView(sessionId: string, skills: Awaited<ReturnType<typeof scanSkills>>): Promise<string[]> {
@@ -186,6 +266,8 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     return true;
   }
 
+  const owned = await db.turn.findFirst({ where: { id: turnId, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } }, select: { id: true } });
+  if (!owned) return false;
   const permission = await db.permissionRequest.create({ data: {
     sdkRequestId: randomUUID(),
     sessionId,
@@ -196,10 +278,15 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     payload: payload as Prisma.InputJsonValue,
     expiresAt: new Date(Date.now() + env.APPROVAL_TIMEOUT_SECONDS * 1000)
   } });
-  await db.$transaction([
-    db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.WAITING_APPROVAL } }),
-    db.turn.update({ where: { id: turnId }, data: { status: TurnStatus.WAITING_APPROVAL } })
-  ]);
+  const waiting = await db.turn.updateMany({
+    where: { id: turnId, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+    data: { status: TurnStatus.WAITING_APPROVAL }
+  });
+  if (waiting.count === 0) {
+    await db.permissionRequest.updateMany({ where: { id: permission.id, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } });
+    return false;
+  }
+  await db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.WAITING_APPROVAL } });
   await appendEvent(sessionId, turnId, "permission.requested", {
     id: permission.id,
     sessionId,
@@ -221,7 +308,7 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
       approved = latestPermission?.status === PermissionStatus.APPROVED;
       break;
     }
-    if (!latestTurn || latestTurn.status === TurnStatus.STOPPED) break;
+    if (!latestTurn || latestTurn.status === TurnStatus.STOPPED || latestTurn.status === TurnStatus.INTERRUPTED || latestTurn.status === TurnStatus.TIMED_OUT || latestTurn.status === TurnStatus.FAILED) break;
     await new Promise((resolve) => setTimeout(resolve, env.WORKER_POLL_INTERVAL_MS));
   }
   const latest = await db.permissionRequest.findUnique({ where: { id: permission.id } });
@@ -231,11 +318,13 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     await appendEvent(sessionId, turnId, "permission.completed", { requestId: permission.id, decision: "expired" });
   }
   const latestTurn = await db.turn.findUnique({ where: { id: turnId }, select: { status: true } });
-  if (!latestTurn || latestTurn.status === TurnStatus.STOPPED) return false;
-  await db.$transaction([
-    db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.RUNNING } }),
-    db.turn.update({ where: { id: turnId }, data: { status: TurnStatus.RUNNING } })
-  ]);
+  if (!latestTurn || latestTurn.status !== TurnStatus.WAITING_APPROVAL) return false;
+  const resumed = await db.turn.updateMany({
+    where: { id: turnId, leaseOwner: workerId, status: TurnStatus.WAITING_APPROVAL },
+    data: { status: TurnStatus.RUNNING }
+  });
+  if (resumed.count === 0) return false;
+  await db.chatSession.updateMany({ where: { id: sessionId, status: SessionStatus.WAITING_APPROVAL }, data: { status: SessionStatus.RUNNING } });
   return approved;
 }
 
@@ -438,27 +527,34 @@ interface TurnJobLike {
 }
 
 async function runTurn(job: TurnJobLike) {
-  const locked = !sessionLocks.has(job.data.sessionId);
-  if (!locked) throw new Error("Session is already processing another turn");
+  if (sessionLocks.has(job.data.sessionId)) {
+    await db.turn.updateMany({
+      where: { id: job.data.turnId, leaseOwner: workerId, status: TurnStatus.RUNNING },
+      data: { status: TurnStatus.QUEUED, startedAt: null, leaseOwner: null, leaseExpiresAt: null, error: null }
+    });
+    return;
+  }
   sessionLocks.add(job.data.sessionId);
+  ownedTurnIds.add(job.data.turnId);
   let sdkSession: CopilotSession | undefined;
   let turnLogger = logger.child({ sessionId: job.data.sessionId });
   try {
     const turn = await db.turn.findUniqueOrThrow({ where: { id: job.data.turnId }, include: { session: { include: { githubAccount: true } }, messages: { where: { role: MessageRole.USER }, orderBy: { createdAt: "asc" }, take: 1 } } });
     turnLogger = logger.child({ userId: turn.session.userId, sessionId: turn.session.id, turnId: turn.id });
     turnLogger.info("Turn processing started");
-    if (turn.status === TurnStatus.STOPPED) return;
+    const owned = await db.turn.updateMany({
+      where: { id: turn.id, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+      data: { status: TurnStatus.RUNNING, startedAt: turn.startedAt ?? new Date(), leaseExpiresAt: new Date(Date.now() + env.TURN_LEASE_MS) }
+    });
+    if (owned.count === 0) return;
     if (!registry.isModelAllowed(turn.session.model)) {
       throw new Error(`Model is not allowed: ${turn.session.model}`);
     }
     const repository = registry.get(turn.session.repositoryId);
     const [git, skills] = await Promise.all([getGitInfo(repository), scanSkills(repository)]);
-    await db.$transaction([
-      db.turn.update({ where: { id: turn.id }, data: { status: TurnStatus.RUNNING, startedAt: new Date() } }),
-      db.chatSession.update({ where: { id: turn.session.id }, data: { status: SessionStatus.RUNNING, branch: git.branch, headSha: git.headSha, dirty: git.dirty, skillManifest: skills.map(({ name, description, source, warning, contentHash }) => ({ name, description, source, warning, contentHash })) } })
-    ]);
+    await db.chatSession.update({ where: { id: turn.session.id }, data: { status: SessionStatus.RUNNING, branch: git.branch, headSha: git.headSha, dirty: git.dirty, skillManifest: skills.map(({ name, description, source, warning, contentHash }) => ({ name, description, source, warning, contentHash })) } });
     await appendEvent(turn.session.id, turn.id, "turn.started", { branch: git.branch, headSha: git.headSha, dirty: git.dirty });
-    const token = decryptToken(turn.session.githubAccount.encryptedAccessToken);
+    const token = await accessTokenForAccount(turn.session.githubAccount.id, Math.max(5 * 60 * 1000, env.TURN_TIMEOUT_MS));
     const client = await getCopilotClient(turn.session.githubAccount.host);
     const tools = createTools(repository, turn.session.id);
     const skillDirectories = await prepareSkillView(turn.session.id, skills);
@@ -545,40 +641,66 @@ async function runTurn(job: TurnJobLike) {
     });
     const prompt = turn.messages[0]?.content;
     if (!prompt) throw new Error("Turn has no user message");
-    await sdkSession.sendAndWait({ prompt }, 15 * 60 * 1000);
+    await waitForTurn({
+      timeoutMs: env.TURN_TIMEOUT_MS,
+      send: (timeoutMs) => sdkSession!.sendAndWait({ prompt }, timeoutMs),
+      abort: async () => {
+        await sdkSession?.abort().catch(() => undefined);
+        await sandboxRequest(`/sessions/${turn.session.id}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
+      }
+    });
     const events = await sdkSession.getEvents();
     const currentTurnEvents = events.slice(eventOffset);
     const content = lastAssistantContent(currentTurnEvents as unknown as Array<{ type: string; data?: { content?: unknown } }>) ?? latestAssistantContent;
-    if (content !== undefined) {
-      turnLogger.info({ event: "agent.message", content }, "Agent message completed");
-      await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.ASSISTANT, content } });
-      await appendEvent(turn.session.id, turn.id, "assistant.message", { content });
-    }
-    const latestTurn = await db.turn.findUnique({ where: { id: turn.id }, select: { status: true } });
+    const latestTurn = await db.turn.findUnique({ where: { id: turn.id }, select: { status: true, leaseOwner: true } });
     if (latestTurn?.status === TurnStatus.STOPPED) {
       stopRequested.add(turn.session.id);
       throw new Error("Turn was stopped");
     }
+    if (latestTurn?.leaseOwner !== workerId || (latestTurn.status !== TurnStatus.RUNNING && latestTurn.status !== TurnStatus.WAITING_APPROVAL)) return;
+    if (content !== undefined) {
+      turnLogger.info({ event: "agent.message", content }, "Agent message completed");
+      await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.ASSISTANT, content } });
+      await appendEvent(turn.session.id, turn.id, "assistant.message", { content });
+      await db.sessionEvent.deleteMany({ where: { turnId: turn.id, kind: "assistant.delta" } });
+    }
     const titleUpdate = turn.session.title === "New chat" ? { title: prompt.replace(/\s+/g, " ").slice(0, 60) } : {};
+    const completed = await db.turn.updateMany({
+      where: { id: turn.id, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+      data: { status: TurnStatus.COMPLETED, completedAt: new Date(), error: null, leaseOwner: null, leaseExpiresAt: null }
+    });
+    if (completed.count === 0) return;
     const nextQueued = await db.turn.findFirst({ where: { sessionId: turn.session.id, status: TurnStatus.QUEUED }, select: { id: true } });
-    await db.$transaction([
-      db.turn.update({ where: { id: turn.id }, data: { status: TurnStatus.COMPLETED, completedAt: new Date() } }),
-      db.chatSession.update({ where: { id: turn.session.id }, data: { status: nextQueued ? SessionStatus.QUEUED : SessionStatus.IDLE, ...titleUpdate } })
-    ]);
+    await db.chatSession.update({ where: { id: turn.session.id }, data: { status: nextQueued ? SessionStatus.QUEUED : SessionStatus.IDLE, ...titleUpdate } });
     await appendEvent(turn.session.id, turn.id, "turn.completed", { title: titleUpdate.title ?? turn.session.title });
     turnLogger.info("Turn processing completed");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown worker error";
-    const stopped = stopRequested.has(job.data.sessionId) || message.toLowerCase().includes("abort");
-    await db.$transaction([
-      db.turn.update({ where: { id: job.data.turnId }, data: { status: stopped ? TurnStatus.STOPPED : TurnStatus.FAILED, error: message, completedAt: new Date() } }),
-      db.chatSession.update({ where: { id: job.data.sessionId }, data: { status: stopped ? SessionStatus.IDLE : SessionStatus.ERROR } })
-    ]);
-    await appendEvent(job.data.sessionId, job.data.turnId, stopped ? "turn.stopped" : "turn.failed", { error: message });
+    const timedOut = error instanceof TurnTimeoutError;
+    const stopped = !timedOut && (stopRequested.has(job.data.sessionId) || message.toLowerCase().includes("abort"));
+    const outcome = timedOut ? TurnStatus.TIMED_OUT : stopped ? TurnStatus.STOPPED : TurnStatus.FAILED;
+    const updated = await db.turn.updateMany({
+      where: { id: job.data.turnId, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+      data: { status: outcome, error: message, completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null }
+    });
+    if (updated.count === 0) {
+      const latest = await db.turn.findUnique({ where: { id: job.data.turnId }, select: { status: true } });
+      if (latest?.status === TurnStatus.STOPPED) {
+        await db.chatSession.updateMany({ where: { id: job.data.sessionId, status: { in: [SessionStatus.RUNNING, SessionStatus.WAITING_APPROVAL, SessionStatus.QUEUED] } }, data: { status: SessionStatus.IDLE } });
+        await appendEvent(job.data.sessionId, job.data.turnId, "turn.stopped", { error: message });
+        turnLogger.info({ error: message }, "Turn processing stopped");
+      } else turnLogger.warn({ error: message, status: latest?.status }, "Turn ended after its lease was lost");
+      return;
+    }
+    await db.chatSession.update({ where: { id: job.data.sessionId }, data: { status: stopped ? SessionStatus.IDLE : SessionStatus.ERROR } });
+    const kind = timedOut ? "turn.timed_out" : stopped ? "turn.stopped" : "turn.failed";
+    await appendEvent(job.data.sessionId, job.data.turnId, kind, { error: message, ...(timedOut ? { reason: "timeout" } : {}) });
     if (stopped) turnLogger.info({ error: message }, "Turn processing stopped");
+    else if (timedOut) turnLogger.warn({ error: message }, "Turn processing timed out");
     else turnLogger.error(error, "Turn processing failed");
     if (!stopped) throw error;
   } finally {
+    ownedTurnIds.delete(job.data.turnId);
     activeSessions.delete(job.data.sessionId);
     stopRequested.delete(job.data.sessionId);
     if (sdkSession) await sdkSession.disconnect().catch(() => undefined);
@@ -591,7 +713,7 @@ const deleteLocks = new Set<string>();
 async function handleControl(name: string, data: Record<string, unknown>) {
   if (name === "list-models") {
     const account = await db.gitHubAccount.findUniqueOrThrow({ where: { id: String(data.githubAccountId) } });
-    const token = decryptToken(account.encryptedAccessToken);
+    const token = await accessTokenForAccount(account.id, 5 * 60 * 1000);
     const host = copilotHostKey(account.host);
     const modelClient = new CopilotClient({
       mode: "copilot-cli",
@@ -614,7 +736,7 @@ async function handleControl(name: string, data: Record<string, unknown>) {
   if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
   const active = activeSessions.get(sessionId);
   if (active) await active.session.abort().catch(() => undefined);
-  await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+  await sandboxRequest(`/sessions/${sessionId}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
   if (name === "delete-session") {
     const deadline = Date.now() + 30_000;
     while (activeSessions.has(sessionId) || sessionLocks.has(sessionId)) {
@@ -642,31 +764,113 @@ async function handleControl(name: string, data: Record<string, unknown>) {
 const executions = new Set<Promise<void>>();
 let schedulerTimer: NodeJS.Timeout | undefined;
 let cancellationTimer: NodeJS.Timeout | undefined;
+let leaseTimer: NodeJS.Timeout | undefined;
 let schedulerBusy = false;
 let cancellationBusy = false;
+let leaseBusy = false;
+let lastRecoveryAt = 0;
 
-async function recoverWork() {
-  const interrupted = await db.turn.findMany({
-    where: { status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+async function pruneSettledDeltas() {
+  await db.$executeRaw`
+    DELETE FROM "SessionEvent"
+    WHERE "kind" = 'assistant.delta'
+      AND "turnId" IN (
+        SELECT "turnId" FROM "Message"
+        WHERE "role" = 'ASSISTANT' AND "turnId" IS NOT NULL
+      )
+  `;
+}
+
+async function recoverExpiredLeases() {
+  const now = new Date();
+  const candidates = await db.turn.findMany({
+    where: expiredForeignLeaseWhere(workerId, now),
     select: { id: true, sessionId: true }
   });
-  if (interrupted.length === 0) return;
-  const turnIds = interrupted.map((turn) => turn.id);
-  const sessionIds = [...new Set(interrupted.map((turn) => turn.sessionId))];
-  const pending = await db.permissionRequest.findMany({ where: { turnId: { in: turnIds }, status: PermissionStatus.PENDING } });
-  await db.$transaction([
-    db.permissionRequest.updateMany({ where: { turnId: { in: turnIds }, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } }),
-    db.turn.updateMany({ where: { id: { in: turnIds } }, data: { status: TurnStatus.QUEUED, startedAt: null, completedAt: null, error: "Recovered after Worker restart" } }),
-    db.chatSession.updateMany({ where: { id: { in: sessionIds } }, data: { status: SessionStatus.QUEUED } })
-  ]);
-  for (const permission of pending) await appendEvent(permission.sessionId, permission.turnId, "permission.completed", { requestId: permission.id, decision: "expired", reason: "worker-restart" });
-  for (const turn of interrupted) await appendEvent(turn.sessionId, turn.id, "turn.queued", { turnId: turn.id, reason: "worker-restart" });
+  for (const candidate of candidates) {
+    const pending = await db.permissionRequest.findMany({
+      where: { turnId: candidate.id, status: PermissionStatus.PENDING },
+      select: { id: true, sessionId: true, turnId: true }
+    });
+    const changed = await db.turn.updateMany({
+      where: { AND: [{ id: candidate.id }, expiredForeignLeaseWhere(workerId, now)] },
+      data: {
+        status: TurnStatus.INTERRUPTED,
+        error: INTERRUPTED_TURN_MESSAGE,
+        completedAt: now,
+        leaseOwner: null,
+        leaseExpiresAt: null
+      }
+    });
+    if (changed.count === 0) continue;
+    if (pending.length > 0) {
+      await db.permissionRequest.updateMany({
+        where: { id: { in: pending.map((permission) => permission.id) }, status: PermissionStatus.PENDING },
+        data: { status: PermissionStatus.EXPIRED, decidedAt: now }
+      });
+      for (const permission of pending) {
+        await appendEvent(permission.sessionId, permission.turnId, "permission.completed", { requestId: permission.id, decision: "expired", reason: "lease-expired" });
+      }
+    }
+    const active = await db.turn.findMany({
+      where: { sessionId: candidate.sessionId, status: { in: [TurnStatus.QUEUED, TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+      select: { status: true }
+    });
+    await db.chatSession.update({
+      where: { id: candidate.sessionId },
+      data: { status: sessionStatusAfterInterrupt(active.map((turn) => turn.status)) }
+    });
+    await appendEvent(candidate.sessionId, candidate.id, "turn.interrupted", { error: INTERRUPTED_TURN_MESSAGE, reason: "lease-expired" });
+    logger.warn({ sessionId: candidate.sessionId, turnId: candidate.id }, "Turn interrupted after lease expiry");
+  }
+}
+
+async function renewLeases() {
+  if (ownedTurnIds.size === 0) return;
+  const ids = [...ownedTurnIds];
+  await db.turn.updateMany({
+    where: { id: { in: ids }, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+    data: { leaseExpiresAt: new Date(Date.now() + env.TURN_LEASE_MS) }
+  });
+  const current = await db.turn.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, status: true, leaseOwner: true }
+  });
+  const lost = new Set(current.filter((turn) => (
+    turn.status === TurnStatus.INTERRUPTED ||
+    ((turn.status === TurnStatus.RUNNING || turn.status === TurnStatus.WAITING_APPROVAL) && turn.leaseOwner !== workerId)
+  )).map((turn) => turn.id));
+  for (const [sessionId, active] of activeSessions) {
+    if (!lost.has(active.turnId)) continue;
+    await active.session.abort().catch(() => undefined);
+    await sandboxRequest(`/sessions/${sessionId}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
+  }
+}
+
+async function claimTurn(turn: { id: string; sessionId: string }): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRaw`UPDATE "ChatSession" SET "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = ${turn.sessionId}`;
+    const busy = await tx.turn.findFirst({
+      where: { sessionId: turn.sessionId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
+      select: { id: true }
+    });
+    if (busy) return false;
+    const claimed = await tx.turn.updateMany({
+      where: { id: turn.id, status: TurnStatus.QUEUED },
+      data: { status: TurnStatus.RUNNING, startedAt: new Date(), error: null, leaseOwner: workerId, leaseExpiresAt: new Date(Date.now() + env.TURN_LEASE_MS) }
+    });
+    return claimed.count === 1;
+  });
 }
 
 async function pollTurns() {
   if (shuttingDown || schedulerBusy) return;
   schedulerBusy = true;
   try {
+    if (Date.now() - lastRecoveryAt >= leaseRenewEveryMs) {
+      lastRecoveryAt = Date.now();
+      await recoverExpiredLeases();
+    }
     const capacity = env.WORKER_CONCURRENCY - executions.size;
     if (capacity <= 0) return;
     const candidates = await db.turn.findMany({
@@ -679,11 +883,8 @@ async function pollTurns() {
     for (const turn of candidates) {
       if (executions.size >= env.WORKER_CONCURRENCY) break;
       if (reservedSessions.has(turn.sessionId)) continue;
-      const claimed = await db.turn.updateMany({
-        where: { id: turn.id, status: TurnStatus.QUEUED },
-        data: { status: TurnStatus.RUNNING, startedAt: new Date(), error: null }
-      });
-      if (claimed.count === 0) continue;
+      const claimed = await claimTurn(turn);
+      if (!claimed) continue;
       reservedSessions.add(turn.sessionId);
       const execution = runTurn({ data: { sessionId: turn.sessionId, turnId: turn.id } })
         .catch(() => undefined)
@@ -704,7 +905,7 @@ async function pollCancellations() {
       if (turn?.status !== TurnStatus.STOPPED) continue;
       stopRequested.add(sessionId);
       await active.session.abort().catch(() => undefined);
-      await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+      await sandboxRequest(`/sessions/${sessionId}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
     }
   } finally {
     cancellationBusy = false;
@@ -745,22 +946,34 @@ await new Promise<void>((resolve, reject) => {
   controlServer.once("error", reject);
   controlServer.listen(env.WORKER_CONTROL_PORT, env.WORKER_CONTROL_HOST, resolve);
 });
-logger.info({ host: env.WORKER_CONTROL_HOST, port: env.WORKER_CONTROL_PORT }, "Worker control listening");
-await recoverWork();
+logger.info({ host: env.WORKER_CONTROL_HOST, port: env.WORKER_CONTROL_PORT, workerId }, "Worker control listening");
+await pruneSettledDeltas();
+await recoverExpiredLeases();
+lastRecoveryAt = Date.now();
 await pollTurns();
 schedulerTimer = setInterval(() => void pollTurns().catch((error) => logger.error(error, "Worker scheduler failed")), env.WORKER_POLL_INTERVAL_MS);
 cancellationTimer = setInterval(() => void pollCancellations().catch((error) => logger.error(error, "Worker cancellation poll failed")), env.WORKER_POLL_INTERVAL_MS);
+leaseTimer = setInterval(() => {
+  if (leaseBusy) return;
+  leaseBusy = true;
+  void renewLeases()
+    .then(() => recoverExpiredLeases())
+    .catch((error) => logger.error(error, "Worker lease renewal failed"))
+    .finally(() => { leaseBusy = false; });
+}, leaseRenewEveryMs);
 
 async function shutdown() {
   shuttingDown = true;
   if (schedulerTimer) clearInterval(schedulerTimer);
   if (cancellationTimer) clearInterval(cancellationTimer);
+  if (leaseTimer) clearInterval(leaseTimer);
+  if (notifyTimer) clearTimeout(notifyTimer);
   for (const [sessionId, active] of activeSessions) {
     stopRequested.add(sessionId);
     const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
     if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
     await active.session.abort().catch(() => undefined);
-    await sandboxRequest(`/sessions/${sessionId}/stop`).catch(() => undefined);
+    await sandboxRequest(`/sessions/${sessionId}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
   }
   await Promise.allSettled([...executions]);
   await new Promise<void>((resolve) => controlServer.close(() => resolve()));

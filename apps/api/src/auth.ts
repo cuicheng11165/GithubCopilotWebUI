@@ -1,11 +1,15 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { createPrismaGitHubTokenStore, db, type ChatSession } from "@app/db";
 import { timingSafeEqualString } from "@app/security";
-import { db, type ChatSession } from "@app/db";
+import { exchangeOAuthRefreshToken } from "../../../packages/db/src/github-access-token.js";
 import { decryptSecret, encryptSecret, hashToken } from "./crypto.js";
 import { oauthProviders } from "./config.js";
 import { readUsableGithubAccount, resolveGithubToken, type GithubRefreshResponse, type GithubTokenUpdate } from "./token-refresh.js";
 
 export const SESSION_COOKIE = "copilot_web_session";
+const apiClaimOwner = `api:${randomUUID()}`;
+const githubTokenStore = createPrismaGitHubTokenStore(db);
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
   const rawToken = request.cookies[SESSION_COOKIE];
@@ -30,7 +34,9 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     encrypt: encryptSecret,
     findAccount: (id: string) => db.gitHubAccount.findUnique({ where: { id } }),
     updateAccount: (id: string, data: GithubTokenUpdate) => db.gitHubAccount.update({ where: { id }, data }),
-    requestRefresh: requestGithubRefresh
+    requestRefresh: requestGithubRefresh,
+    tokenStore: githubTokenStore,
+    claimOwner: apiClaimOwner
   };
   try {
     const resolved = await resolveGithubToken(account, refreshDeps);
@@ -73,17 +79,18 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
 async function requestGithubRefresh(account: { provider: string }, refreshToken: string): Promise<GithubRefreshResponse> {
   const provider = oauthProviders.find((item) => item.id === account.provider);
   if (!provider) throw new Error("OAuth provider is no longer configured");
-  const response = await fetch(`${provider.webBaseUrl}/login/oauth/access_token`, {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "copilot-web-ui" },
-    body: JSON.stringify({
-      client_id: provider.clientId,
-      client_secret: provider.clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken
-    })
+  const refreshed = await exchangeOAuthRefreshToken({
+    webBaseUrl: provider.webBaseUrl,
+    clientId: provider.clientId,
+    clientSecret: provider.clientSecret,
+    refreshToken
   });
-  return await response.json() as GithubRefreshResponse;
+  return {
+    access_token: refreshed.accessToken,
+    ...(refreshed.refreshToken ? { refresh_token: refreshed.refreshToken } : {}),
+    ...(refreshed.expiresIn !== null ? { expires_in: refreshed.expiresIn } : {}),
+    ...(refreshed.refreshTokenExpiresIn !== null ? { refresh_token_expires_in: refreshed.refreshTokenExpiresIn } : {})
+  };
 }
 
 export function bindSessionLog(request: FastifyRequest, userId: string, sessionId: string): void {

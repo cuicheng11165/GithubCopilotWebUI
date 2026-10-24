@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldAutoApprove } from "./index.js";
+import { eventKindSchema, shouldAutoApprove, turnStatusSchema } from "./index.js";
 
 describe("approval policy", () => {
   it("never auto-approves interactive requests", () => expect(shouldAutoApprove("interactive", ["shell"], "shell")).toBe(false));
@@ -9,4 +9,10 @@ describe("approval policy", () => {
   });
   it("auto-approves supported tools in allow-all", () => expect(shouldAutoApprove("allow-all", [], "private-script")).toBe(true));
   it("supports session-scoped MCP approval", () => expect(shouldAutoApprove("session-scoped", ["mcp"], "mcp")).toBe(true));
+  it("distinguishes timed-out and interrupted turns", () => {
+    expect(turnStatusSchema.parse("timed-out")).toBe("timed-out");
+    expect(turnStatusSchema.parse("interrupted")).toBe("interrupted");
+    expect(eventKindSchema.parse("turn.timed_out")).toBe("turn.timed_out");
+    expect(eventKindSchema.parse("turn.interrupted")).toBe("turn.interrupted");
+  });
 });
