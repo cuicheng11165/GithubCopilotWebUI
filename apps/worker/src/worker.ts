@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash, randomUUID } from "node:crypto";
+import { createDecipheriv, randomUUID } from "node:crypto";
 import { mkdir, rm, symlink } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -22,28 +22,31 @@ import {
   viewRepositoryFile,
   type RepositoryConfig
 } from "@app/repository-tools";
+import { bearerAuthorizationMatches, decodeTokenEncryptionKey, parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
 import { sanitizeSdkEventForLog, sanitizeToolEventForLog } from "./tool-event-log.js";
 import { lastAssistantContent } from "./assistant-response.js";
 import { resolvePythonLauncher } from "./platform.js";
 import { z } from "zod";
 
 const booleanEnvironmentValue = z.enum(["true", "false"]).default("false").transform((value) => value === "true");
-const env = z.object({
+const workerEnvSchema = z.object({
   WORKER_CONTROL_HOST: z.string().default("127.0.0.1"),
   WORKER_CONTROL_PORT: z.coerce.number().int().positive().default(4200),
-  WORKER_CONTROL_TOKEN: z.string().min(32),
+  WORKER_CONTROL_TOKEN: serviceTokenSchema("WORKER_CONTROL_TOKEN"),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
-  TOKEN_ENCRYPTION_KEY: z.string().min(32),
+  TOKEN_ENCRYPTION_KEY: tokenEncryptionKeySchema(),
   REPOSITORIES_CONFIG: z.string().default("./config/repositories.yaml"),
   COPILOT_HOME: z.string().default("./data/copilot"),
   SANDBOX_RUNNER_URL: z.string().url().default("http://127.0.0.1:4100"),
-  SANDBOX_RUNNER_TOKEN: z.string().min(32),
+  SANDBOX_RUNNER_TOKEN: serviceTokenSchema("SANDBOX_RUNNER_TOKEN"),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
   LLM_TRACE_ENABLED: booleanEnvironmentValue,
   LLM_TRACE_CAPTURE_CONTENT: booleanEnvironmentValue,
   LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl")
-}).parse(process.env);
+});
+const env = parseEnv(workerEnvSchema);
+const tokenEncryptionKey = decodeTokenEncryptionKey(env.TOKEN_ENCRYPTION_KEY);
 const logger = createServiceLogger({ service: "worker" });
 const traceRotation = rotationOptionsFromEnvironment();
 logger.info({ timestampFormat: "ISO 8601 UTC" }, "Worker session-routed text logging ready");
@@ -115,9 +118,7 @@ function approvalScopesFromDb(value: Prisma.JsonValue): ApprovalScope[] {
 function decryptToken(value: string): string {
   const [version, iv, tag, encrypted] = value.split(".");
   if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Unsupported encrypted token format");
-  const raw = Buffer.from(env.TOKEN_ENCRYPTION_KEY, "base64");
-  const key = raw.length === 32 ? raw : createHash("sha256").update(env.TOKEN_ENCRYPTION_KEY).digest();
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
+  const decipher = createDecipheriv("aes-256-gcm", tokenEncryptionKey, Buffer.from(iv, "base64url"));
   decipher.setAuthTag(Buffer.from(tag, "base64url"));
   return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
 }
@@ -727,7 +728,7 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
 const controlServer = createServer(async (request, response) => {
   try {
     if (request.url === "/health/ready" && request.method === "GET") return sendJson(response, 200, { status: "ready", database: "sqlite" });
-    if (request.headers.authorization !== `Bearer ${env.WORKER_CONTROL_TOKEN}`) return sendJson(response, 401, { error: "Unauthorized" });
+    if (!bearerAuthorizationMatches(request.headers.authorization, env.WORKER_CONTROL_TOKEN)) return sendJson(response, 401, { error: "Unauthorized" });
     if (request.method !== "POST") return sendJson(response, 404, { error: "Not found" });
     const body = await readJson(request);
     if (request.url === "/models") return sendJson(response, 200, await handleControl("list-models", body));

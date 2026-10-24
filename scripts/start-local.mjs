@@ -2,6 +2,7 @@ import { cpSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { assertRepositoriesConfig } from "./repositories-config.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const envFile = path.join(root, ".env");
@@ -15,6 +16,13 @@ for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_RO
 process.env.NODE_ENV = "production";
 process.env.WORKER_CONCURRENCY ??= "20";
 process.env.API_INTERNAL_URL ??= "http://127.0.0.1:4000";
+
+try {
+  assertRepositoriesConfig(root);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+}
 
 const pnpmCli = process.env.npm_execpath;
 const migrateCommand = pnpmCli ? process.execPath : "pnpm";

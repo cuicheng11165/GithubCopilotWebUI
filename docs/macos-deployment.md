@@ -114,11 +114,13 @@ GitHub App 的本机配置通常为：
 
 编辑 `config/repositories.yaml`，使用真实的绝对路径：
 
-如需开放对话质量审计页，在该文件中设置以下配置并访问 `/audit`。该页面可读取所有用户的完整对话，且不做额外权限限制，请只在受信任的内网环境中开启：
+如需开放对话质量审计页，在该文件中设置以下配置并访问 `/audit`。调用方必须已登录，且 GitHub 登录名在 `admins` 中。该页面可读取所有用户的完整对话，请只把受信任的管理员列入允许列表：
 
 ```yaml
 audit:
   enabled: true
+  admins:
+    - your-github-login
 ```
 
 ```yaml

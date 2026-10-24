@@ -26,6 +26,38 @@ repositories:
 `);
     await registry.load();
     expect(registry.isAuditEnabled()).toBe(false);
+    expect(registry.isAuditAdmin("octocat")).toBe(false);
+  });
+
+  it("allows audit reads only for configured GitHub logins", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "repo-tools-"));
+    const config = path.join(root, "repositories.yaml");
+    await writeFile(config, `audit:
+  enabled: true
+  admins:
+    - OctoCat
+    - octocat
+repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+`);
+    const registry = new RepositoryRegistry(config);
+    await registry.load();
+    expect(registry.isAuditEnabled()).toBe(true);
+    expect(registry.isAuditAdmin("octocat")).toBe(true);
+    expect(registry.isAuditAdmin(" OCTOCAT ")).toBe(true);
+    expect(registry.isAuditAdmin("someone-else")).toBe(false);
+
+    await writeFile(config, `audit:
+  enabled: true
+repositories:
+  - id: test
+    displayName: Test
+    path: ${JSON.stringify(root)}
+`);
+    await registry.load();
+    expect(registry.isAuditAdmin("octocat")).toBe(false);
   });
 
   it("loads and deduplicates the model blacklist and rejects automatic routing", async () => {

@@ -1,3 +1,4 @@
+import { parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
 import { z } from "zod";
 
 const envSchema = z.object({
@@ -7,10 +8,10 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().min(1),
   WORKER_CONTROL_URL: z.string().url().default("http://127.0.0.1:4200"),
-  WORKER_CONTROL_TOKEN: z.string().min(32),
+  WORKER_CONTROL_TOKEN: serviceTokenSchema("WORKER_CONTROL_TOKEN"),
   EVENT_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
-  COOKIE_SECRET: z.string().min(32),
-  TOKEN_ENCRYPTION_KEY: z.string().min(32),
+  COOKIE_SECRET: serviceTokenSchema("COOKIE_SECRET"),
+  TOKEN_ENCRYPTION_KEY: tokenEncryptionKeySchema(),
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),
   GITHUB_CLIENT_ID: z.string().optional().or(z.literal("")),
   GITHUB_CLIENT_SECRET: z.string().optional().or(z.literal("")),
@@ -23,7 +24,7 @@ const envSchema = z.object({
   GHE_ALLOWED_ENTERPRISES: z.string().default("")
 });
 
-export const config = envSchema.parse(process.env);
+export const config = parseEnv(envSchema);
 
 export interface OAuthProviderConfig {
   id: "github" | "ghe";

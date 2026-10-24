@@ -1,10 +1,17 @@
+# Copy this file to config/repositories.yaml before startup.
+# config/repositories.yaml is gitignored and stores machine-local paths.
+# dev and start-local exit with this copy command when that file is missing.
+
 modelBlacklist:
   # Model IDs are matched exactly. Automatic model routing is disabled.
   - weak-model-id
 
-# Exposes /audit and its read-only APIs. No additional authorization is applied.
+# When enabled, signed-in users listed in admins can read every conversation
+# through /api/audit/sessions. GitHub logins are matched case-insensitively.
+# An empty list keeps those conversation endpoints closed.
 audit:
   enabled: false
+  admins: []
 
 repositories:
   - id: example

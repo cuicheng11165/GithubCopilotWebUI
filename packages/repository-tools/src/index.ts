@@ -13,7 +13,13 @@ function toPosixPath(value: string): string {
 }
 
 const repositoryConfigSchema = z.object({
-  audit: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  audit: z.object({
+    enabled: z.boolean().default(false),
+    admins: z.array(z.string().trim().min(1).max(100)).default([])
+  }).default({}).transform((audit) => ({
+    enabled: audit.enabled,
+    admins: [...new Set(audit.admins.map((login) => login.toLowerCase()))]
+  })),
   modelBlacklist: z.array(z.string().trim().min(1).max(100))
     .default([])
     .transform((models) => [...new Set(models)]),
@@ -116,6 +122,7 @@ export class RepositoryRegistry {
   private repositories = new Map<string, RepositoryConfig>();
   private modelBlacklist = new Set<string>();
   private auditEnabled = false;
+  private auditAdmins = new Set<string>();
   private watcher: FSWatcher | undefined;
   private reloadTimer: NodeJS.Timeout | undefined;
 
@@ -144,6 +151,7 @@ export class RepositoryRegistry {
     this.repositories = next;
     this.modelBlacklist = new Set(parsed.modelBlacklist);
     this.auditEnabled = parsed.audit.enabled;
+    this.auditAdmins = new Set(parsed.audit.admins);
   }
 
   watch(onError: (error: Error) => void = console.error): void {
@@ -173,6 +181,10 @@ export class RepositoryRegistry {
 
   isAuditEnabled(): boolean {
     return this.auditEnabled;
+  }
+
+  isAuditAdmin(login: string): boolean {
+    return this.auditAdmins.has(login.trim().toLowerCase());
   }
 
   get(id: string): RepositoryConfig {

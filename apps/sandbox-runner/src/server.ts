@@ -1,19 +1,20 @@
 import Fastify from "fastify";
 import { z } from "zod";
 import { RepositoryRegistry } from "@app/repository-tools";
+import { bearerAuthorizationMatches, parseEnv, serviceTokenSchema } from "@app/security";
 import { ExecutionManager } from "./execution.js";
 import { requestPublicUrl } from "./network.js";
 import { applyRepositoryPatch } from "./patch.js";
 
-const env = z.object({
+const env = parseEnv(z.object({
   SANDBOX_RUNNER_HOST: z.string().default("127.0.0.1"),
   SANDBOX_RUNNER_PORT: z.coerce.number().int().positive().default(4100),
-  SANDBOX_RUNNER_TOKEN: z.string().min(32),
+  SANDBOX_RUNNER_TOKEN: serviceTokenSchema("SANDBOX_RUNNER_TOKEN"),
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),
   COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   COMMAND_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().default(1_048_576),
   LOCAL_SANDBOX_TMP_ROOT: z.string().default("./data/local-sandbox")
-}).parse(process.env);
+}));
 
 const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
 const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
@@ -25,7 +26,7 @@ app.log.warn("Commands and private scripts run directly as the GithubCopilotWebU
 
 app.addHook("onRequest", async (request, reply) => {
   if (request.url.startsWith("/health/")) return;
-  if (request.headers.authorization !== `Bearer ${env.SANDBOX_RUNNER_TOKEN}`) return reply.code(401).send({ error: "Unauthorized" });
+  if (!bearerAuthorizationMatches(request.headers.authorization, env.SANDBOX_RUNNER_TOKEN)) return reply.code(401).send({ error: "Unauthorized" });
 });
 
 const executeSchema = z.object({

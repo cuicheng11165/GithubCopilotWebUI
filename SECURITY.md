@@ -6,7 +6,8 @@ GithubCopilotWebUI is a trusted-machine application without process or network i
 
 - GitHub tokens are encrypted at rest with AES-256-GCM and are decrypted only by the API or Worker.
 - Tokens, application secrets, and database credentials are not added to the environment passed to executed commands.
-- Session identifiers are not authorization. Every API operation checks the authenticated owner in SQLite.
+- Session identifiers are not authorization. Session routes check the authenticated owner in SQLite.
+- Audit conversation reads (`/api/audit/sessions` and `/api/audit/sessions/:id`) require an authenticated user whose GitHub login is listed in `audit.admins`. An empty allowlist keeps those endpoints closed.
 - The Copilot runtime uses `mode: "empty"`, receives a per-user GitHub token, and exposes only application-defined tools.
 - SDK write/edit tools and unexpected `write` permission requests are rejected. Repository edits are available only through the custom `apply_patch` tool or an approved host command/private script.
 - The Local Execution Runner and Worker control endpoint bind to loopback by default and require independent bearer tokens.
@@ -35,6 +36,7 @@ Shell commands and private scripts use the host network directly. They can acces
 
 - Run the application with a dedicated low-privilege operating-system account.
 - Keep API, Local Execution Runner, and Worker control ports on loopback; expose only the Web endpoint through a trusted HTTPS reverse proxy when remote access is required.
+- `TOKEN_ENCRYPTION_KEY` must be base64 for exactly 32 bytes. `COOKIE_SECRET`, `SANDBOX_RUNNER_TOKEN`, and `WORKER_CONTROL_TOKEN` must be unique values of at least 32 characters. Placeholder values from `.env.example` are rejected at startup.
 - Rotate `COOKIE_SECRET`, `TOKEN_ENCRYPTION_KEY`, `SANDBOX_RUNNER_TOKEN`, and `WORKER_CONTROL_TOKEN` using an established secret-management process.
 - Protect and back up `data/copilot.db` together with `data/copilot/`; stop the services or use a SQLite-aware online backup so the WAL is not omitted.
 - Review `AuditLog` records without copying OAuth tokens or sensitive command output into external logging systems.
