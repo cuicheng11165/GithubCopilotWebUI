@@ -1,4 +1,4 @@
-import Fastify, { type FastifyBaseLogger } from "fastify";
+import Fastify, { type FastifyBaseLogger, type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,7 @@ import {
 import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
 import { createServiceLogger } from "@app/logging";
 import { RepositoryRegistry, getGitInfo, scanAgents, scanSkills } from "@app/repository-tools";
+import { auditSessionsAccess } from "./audit-access.js";
 import { authenticate, bindSessionLog, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
 import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
@@ -137,10 +138,30 @@ app.get("/health/ready", async (_request, reply) => {
   }
 });
 
+async function enforceAuditAccess(request: FastifyRequest, reply: FastifyReply) {
+  if (!registry.isAuditEnabled()) {
+    const decision = auditSessionsAccess({ enabled: false, login: null, isAdmin: false });
+    if (decision.status !== 200) await reply.code(decision.status).send({ error: decision.error });
+    return null;
+  }
+  const auth = await authenticate(request, reply);
+  if (!(auth && "user" in auth)) return null;
+  const decision = auditSessionsAccess({
+    enabled: true,
+    login: auth.user.login,
+    isAdmin: registry.isAuditAdmin(auth.user.login)
+  });
+  if (decision.status !== 200) {
+    await reply.code(decision.status).send({ error: decision.error });
+    return null;
+  }
+  return auth;
+}
+
 app.get("/api/audit/status", async () => ({ enabled: registry.isAuditEnabled() }));
 
 app.get<{ Querystring: { search?: string; limit?: string; offset?: string } }>("/api/audit/sessions", async (request, reply) => {
-  if (!registry.isAuditEnabled()) return reply.code(404).send({ error: "Audit page is disabled" });
+  if (!(await enforceAuditAccess(request, reply))) return;
   const search = request.query.search?.trim().slice(0, 200) ?? "";
   const limit = Math.min(Math.max(Number.parseInt(request.query.limit ?? "100", 10) || 100, 1), 500);
   const offset = Math.max(Number.parseInt(request.query.offset ?? "0", 10) || 0, 0);
@@ -176,7 +197,7 @@ app.get<{ Querystring: { search?: string; limit?: string; offset?: string } }>("
 });
 
 app.get<{ Params: { id: string } }>("/api/audit/sessions/:id", async (request, reply) => {
-  if (!registry.isAuditEnabled()) return reply.code(404).send({ error: "Audit page is disabled" });
+  if (!(await enforceAuditAccess(request, reply))) return;
   const session = await db.chatSession.findUnique({
     where: { id: request.params.id },
     include: {

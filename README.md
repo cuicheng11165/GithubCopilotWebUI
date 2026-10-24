@@ -33,8 +33,8 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 
 ### 仓库选择与仓库上下文
 
-- 管理员在 `config/repositories.yaml` 中登记本机上的可信仓库。
-- 可通过同一配置文件开启 `/audit` 只读审计页，集中查看所有用户的完整对话；该页面不附加权限校验，默认关闭。
+- 管理员从 `config/repositories.example.yaml` 复制出 `config/repositories.yaml`，在其中登记本机上的可信仓库。本地仓库配置不进入版本库；`pnpm dev` 与 `pnpm start:local` 在文件缺失时会提示复制命令。
+- 可通过同一配置文件开启 `/audit` 只读审计页，集中查看所有用户的完整对话。页面默认关闭；开启后调用方必须已登录，且 GitHub 登录名位于 `audit.admins` 允许列表中。
 - 可在该文件顶层通过 `modelBlacklist` 按模型 ID 精确屏蔽能力较弱的模型；自动模型路由已禁用。
 - 系统会扫描配置仓库的 `.github/agents`、`.agents/agents` 和 `.claude/agents`，用户可在每个会话中选择实际存在的 custom agent。
 - API 会返回每个启用仓库的基本信息，包括显示名称、当前分支、HEAD SHA、工作区是否有未提交改动等。
@@ -218,8 +218,8 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 
 主要职责：
 
-- 加载和监听 `config/repositories.yaml`。
-- 读取并热更新 `audit.enabled`；开启后提供无额外鉴权的全局对话审计页和只读接口。
+- 加载和监听 `config/repositories.yaml`（由 `config/repositories.example.yaml` 复制而来）。
+- 读取并热更新 `audit.enabled` 与 `audit.admins`；开启后，已登录且 GitHub 登录名在允许列表中的管理员可以读取全局对话。
 - 校验仓库 ID、显示名、绝对路径、重复路径等配置。
 - 获取 Git 分支、HEAD SHA 和 dirty 状态。
 - 扫描仓库技能目录并解析 `SKILL.md` frontmatter。
@@ -229,6 +229,10 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 ### `packages/logging`：日志封装
 
 `packages/logging` 提供项目统一的 Pino 日志能力，并支持按用户、会话和服务拆分日志输出。API 和 Worker 都通过该包创建服务日志器。
+
+### `packages/security`：密钥与比较
+
+`packages/security` 提供 API、Worker 和执行代理共享的安全辅助函数：用 `crypto.timingSafeEqual` 比较 CSRF 与服务 Bearer token，并在启动时校验密钥。`TOKEN_ENCRYPTION_KEY` 必须是解码后恰好 32 字节的 base64；`.env.example` 中的占位值会被拒绝。
 
 ## 核心数据流
 
@@ -273,7 +277,8 @@ packages/
   db/               Prisma schema、迁移脚本和数据库客户端
   logging/          统一日志封装
   repository-tools/ 仓库注册表、Git 信息、技能扫描和只读仓库工具
-config/             仓库配置示例与本地仓库配置
+  security/         常量时间比较与启动时密钥校验
+config/             仓库配置示例；复制为 gitignore 的 repositories.yaml
 scripts/            本地开发和组合启动脚本
 docs/               API、存储和平台相关补充文档
 ```
@@ -318,8 +323,8 @@ GithubCopilotWebUI is designed to provide a unified Copilot Agent entry point fo
 
 ### Repository Selection And Context
 
-- Administrators register trusted local repositories in `config/repositories.yaml`.
-- The same file can enable a read-only `/audit` page for reviewing every user's conversations. It has no additional authorization and is disabled by default.
+- Administrators copy `config/repositories.example.yaml` to `config/repositories.yaml` and register trusted local repositories there. The local file is gitignored. `pnpm dev` and `pnpm start:local` print the copy command when it is missing.
+- The same file can enable a read-only `/audit` page for reviewing every user's conversations. It is disabled by default. When enabled, the caller must be signed in and their GitHub login must be listed in `audit.admins`.
 - A top-level `modelBlacklist` can hide weaker models by exact model ID; automatic model routing is disabled.
 - Custom agents are discovered from `.github/agents`, `.agents/agents`, and `.claude/agents` in each configured repository and can be selected per conversation.
 - The API returns metadata for each enabled repository, including display name, current branch, HEAD SHA, and dirty working tree status.
@@ -503,8 +508,8 @@ This package keeps Web, API, and Worker behavior aligned around the same busines
 
 Main responsibilities:
 
-- Load and watch `config/repositories.yaml`.
-- Load and hot-reload `audit.enabled`; when enabled, expose the unauthenticated read-only conversation audit surface.
+- Load and watch `config/repositories.yaml`, copied from `config/repositories.example.yaml`.
+- Load and hot-reload `audit.enabled` and `audit.admins`. When audit is enabled, a signed-in user whose GitHub login is on that allowlist can read every conversation.
 - Validate repository IDs, display names, absolute paths, duplicate paths, and related configuration.
 - Read Git branch, HEAD SHA, and dirty status.
 - Scan repository skill directories and parse `SKILL.md` frontmatter.
@@ -514,6 +519,10 @@ Main responsibilities:
 ### `packages/logging`: Logging Wrapper
 
 `packages/logging` provides unified Pino logging and supports log splitting by user, session, and service. Both the API and Worker create service loggers through this package.
+
+### `packages/security`: Secrets And Comparison
+
+`packages/security` shares helpers across the API, Worker, and execution proxy. It compares CSRF tokens and service bearer tokens with `crypto.timingSafeEqual`, and validates secrets at startup. `TOKEN_ENCRYPTION_KEY` must be base64 that decodes to exactly 32 bytes. Placeholder values from `.env.example` are rejected.
 
 ## Core Data Flow
 
@@ -558,7 +567,8 @@ packages/
   db/               Prisma schema, migration scripts, and database client
   logging/          Unified logging wrapper
   repository-tools/ Repository registry, Git info, skill scanning, and read-only repository tools
-config/             Repository configuration examples and local repository config
+  security/         Constant-time comparison and startup secret validation
+config/             Example repository config; copy to gitignored repositories.yaml
 scripts/            Local development and combined startup scripts
 docs/               Supplemental API, storage, and platform documentation
 ```

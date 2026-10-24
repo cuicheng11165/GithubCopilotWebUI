@@ -2,6 +2,8 @@
 
 All application routes are under `/api`. Browser authentication uses the `copilot_web_session` HttpOnly cookie. Mutating routes require the `X-CSRF-Token` returned by `GET /api/me`.
 
+`/audit/status` reports only whether the audit page is enabled. The conversation routes additionally require the signed-in GitHub login to appear in `audit.admins` in the repository config.
+
 | Method | Route | Purpose |
 | --- | --- | --- |
 | GET | `/auth/providers` | List configured GitHub hosts |
@@ -9,6 +11,9 @@ All application routes are under `/api`. Browser authentication uses the `copilo
 | GET | `/auth/:provider/callback` | Complete OAuth |
 | POST | `/auth/logout` | Revoke the web session and stop active turns |
 | GET | `/me` | Current user and CSRF token |
+| GET | `/audit/status` | Whether the audit page is enabled |
+| GET | `/audit/sessions` | List every conversation for a signed-in `audit.admins` user. `404` when audit is disabled, `403` when the login is not listed |
+| GET | `/audit/sessions/:id` | Read one conversation, including messages, for a signed-in `audit.admins` user |
 | GET | `/repositories` | Enabled repository metadata and skills |
 | GET | `/models` | Models available to the current Copilot identity |
 | GET/POST | `/sessions` | List or create conversations |

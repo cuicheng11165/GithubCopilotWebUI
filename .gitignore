@@ -7,6 +7,8 @@ coverage/
 *.tsbuildinfo
 .env
 .env.local
+# Local repository registry. Copy from config/repositories.example.yaml.
+config/repositories.yaml
 *.log
 data/
 packages/db/prisma/dev.db
