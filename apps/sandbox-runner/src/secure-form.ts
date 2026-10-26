@@ -289,11 +289,23 @@ function executionInput(base: {
   };
 }
 
+function hookEnvironment(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  if (!extra) return {};
+  const result: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(extra)) {
+    if (!value) continue;
+    if (/TOKEN|SECRET|PASSWORD|COOKIE/i.test(key)) continue;
+    result[key] = value;
+  }
+  return result;
+}
+
 export function createSecureFormBridge(options: {
   api: SecureFormApi;
   beginStdin: (input: ExecutionInput) => StdinExecution;
   runWithStdin: (input: ExecutionInput & { stdin: string; secrets?: readonly string[] }) => Promise<ExecutionResult>;
   pollMs?: number;
+  extraEnv?: NodeJS.ProcessEnv;
 }) {
   return {
     async attach(input: {
@@ -354,11 +366,13 @@ export function createSecureFormBridge(options: {
         await new Promise<void>((resolve) => server.close(() => resolve()));
         throw error;
       }
+      const env: NodeJS.ProcessEnv = {
+        ...hookEnvironment(options.extraEnv),
+        COPILOT_SECURE_FORM_SOCKET: socketPath,
+        COPILOT_SECURE_FORM_BIN: binPath
+      };
       return {
-        env: {
-          COPILOT_SECURE_FORM_SOCKET: socketPath,
-          COPILOT_SECURE_FORM_BIN: binPath
-        },
+        env,
         async close() {
           for (const socket of sockets) socket.destroy();
           await new Promise<void>((resolve) => server.close(() => resolve()));

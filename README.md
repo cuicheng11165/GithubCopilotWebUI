@@ -97,7 +97,7 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 
 > 注意：这些审批模式只控制执行是否可以开始，并不构成操作系统级沙箱。被批准的命令或脚本会以运行本服务的系统用户身份执行。
 
-安全表单不受 allow-all 自动跳过。需要口令、一次性验证码，或“在手机上批准”时，Agent 调用 `request_secure_form`，或已批准的命令执行 `node "$COPILOT_SECURE_FORM_BIN"`。界面按步骤显示卡片；密码和验证码用掩码输入。提交后的值只通过已认证的内部通道写到目标进程的 stdin，模型和会话事件只看到成功或失败。详见 `docs/secure-form.md`。
+安全表单不受 allow-all 自动跳过。需要口令、一次性验证码，或“在手机上批准”时，Agent 调用 `request_secure_form`，或已批准的命令执行 `node "$COPILOT_SECURE_FORM_BIN"`。界面按步骤显示卡片；密码和验证码用掩码输入。提交后的值只通过已认证的内部通道写到目标进程的 stdin，模型和会话事件只看到成功或失败。Microsoft 或 SharePoint 登录可在已批准的 shell 中运行 `node "$MS_LOGIN_CLI"`：脚本用 Playwright 打开登录页，每一步仍通过安全表单向 stdin 读取。详见 `docs/secure-form.md`。
 
 ### 停止、恢复与删除
 
@@ -393,7 +393,7 @@ Sessions support three approval modes:
 
 > Note: these approval modes only control whether execution may start. They are not an operating-system sandbox. Approved commands or scripts run as the same system user that started the service.
 
-Secure forms are not skipped by allow-all. When a task needs a password, one-time code, or an approve-on-device confirmation, the agent calls `request_secure_form`, or an approved command runs `node "$COPILOT_SECURE_FORM_BIN"`. The chat shows one card per step. Password and one-time-code fields are masked. Submitted values are written to the target process stdin over the authenticated internal channel. The model and session events learn only success or failure. See `docs/secure-form.md`.
+Secure forms are not skipped by allow-all. When a task needs a password, one-time code, or an approve-on-device confirmation, the agent calls `request_secure_form`, or an approved command runs `node "$COPILOT_SECURE_FORM_BIN"`. The chat shows one card per step. Password and one-time-code fields are masked. Submitted values are written to the target process stdin over the authenticated internal channel. The model and session events learn only success or failure. Microsoft or SharePoint sign-in can run `node "$MS_LOGIN_CLI"` inside an approved shell. That Playwright script opens the login page and still reads each value from a secure form on stdin. See `docs/secure-form.md`.
 
 ### Stop, Resume, And Delete
 

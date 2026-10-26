@@ -146,6 +146,46 @@ describe("secure form command hook", () => {
     await attached.close();
   });
 
+  it("passes the Microsoft login CLI path without service tokens", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "secure-form-hook-"));
+    directories.push(directory);
+    const bridge = createSecureFormBridge({
+      api: {
+        create: async () => snapshot("submitted"),
+        read: async () => snapshot("submitted"),
+        claim: async () => { throw new Error("unused"); },
+        claimStep: async () => { throw new Error("unused"); },
+        cancel: async () => undefined,
+        expire: async () => undefined
+      },
+      beginStdin: () => { throw new Error("unused"); },
+      runWithStdin: async () => { throw new Error("unused"); },
+      extraEnv: {
+        MS_LOGIN_CLI: "/opt/ms-login/cli.js",
+        PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright",
+        SANDBOX_RUNNER_TOKEN: "super-secret-token"
+      }
+    });
+    const attached = await bridge.attach({
+      sessionId,
+      tempDirectory: directory,
+      repositoryPath: directory,
+      timeoutSeconds: 2,
+      maxOutputBytes: 1024,
+      controls: { pauseTimeout() {}, resumeTimeout() {}, redact() {} }
+    });
+    expect(Object.keys(attached.env).sort()).toEqual([
+      "COPILOT_SECURE_FORM_BIN",
+      "COPILOT_SECURE_FORM_SOCKET",
+      "MS_LOGIN_CLI",
+      "PLAYWRIGHT_BROWSERS_PATH"
+    ]);
+    expect(attached.env.MS_LOGIN_CLI).toBe("/opt/ms-login/cli.js");
+    expect(JSON.stringify(attached.env)).not.toContain("TOKEN");
+    expect(JSON.stringify(attached.env)).not.toContain("super-secret-token");
+    await attached.close();
+  });
+
   it("strips secret fields from a hook response before printing it", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "secure-form-cli-"));
     directories.push(directory);

@@ -16,7 +16,9 @@ const env = parseEnv(z.object({
   COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   COMMAND_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().default(1_048_576),
   LOCAL_SANDBOX_TMP_ROOT: z.string().default("./data/local-sandbox"),
-  API_INTERNAL_URL: z.string().url().default("http://127.0.0.1:4000")
+  API_INTERNAL_URL: z.string().url().default("http://127.0.0.1:4000"),
+  MS_LOGIN_CLI: z.string().optional().default(""),
+  PLAYWRIGHT_BROWSERS_PATH: z.string().optional().default("")
 }));
 
 const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
@@ -25,10 +27,14 @@ await registry.load();
 registry.watch((error) => app.log.error(error, "Repository registry reload failed"));
 const executions = new ExecutionManager();
 const secureFormApi = createSecureFormApi({ baseUrl: env.API_INTERNAL_URL, token: env.SANDBOX_RUNNER_TOKEN });
+const loginEnv: NodeJS.ProcessEnv = {};
+if (env.MS_LOGIN_CLI) loginEnv.MS_LOGIN_CLI = env.MS_LOGIN_CLI;
+if (env.PLAYWRIGHT_BROWSERS_PATH) loginEnv.PLAYWRIGHT_BROWSERS_PATH = env.PLAYWRIGHT_BROWSERS_PATH;
 executions.setBridge(createSecureFormBridge({
   api: secureFormApi,
   beginStdin: (input) => executions.beginStdin(input),
-  runWithStdin: (input) => executions.runWithStdin(input)
+  runWithStdin: (input) => executions.runWithStdin(input),
+  ...(Object.keys(loginEnv).length > 0 ? { extraEnv: loginEnv } : {})
 }));
 
 app.log.warn("Commands and private scripts run directly as the GithubCopilotWebUI host user without isolation");

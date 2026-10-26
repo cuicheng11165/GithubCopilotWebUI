@@ -36,7 +36,7 @@ Approval requests expire after five minutes and are denied on stop, logout, dele
 - Allow-all does not submit or skip a secure form. A `deliveryCommand` still needs a separate shell approval before the form opens, including in allow-all and session-scoped modes. A helper started inside an already approved shell is covered by that shell approval.
 - The turn clock pauses while a form is pending, and the worker keeps renewing the turn lease. Stop, logout, deletion, worker shutdown, and lease recovery cancel pending forms.
 - Exact stdout/stderr redaction runs after a delivery command. It does not stop a command from encoding or writing the same secret somewhere else. An approved shell remains the host-user trust boundary described above.
-- There is no browser automation. Values are not typed into a third-party login page. The real handoff is JSON on the receiving process stdin.
+- `packages/ms-login` is a Playwright script for Microsoft and SharePoint sign-in. It runs inside an approved shell, asks for each value with a secure form, and reads that value from the delivery process stdin. It does not log, screenshot, or put passwords in arguments. The saved file is browser storage state (cookies) with mode `0600`. Other sites still have no login driver. Conditional access, FIDO or passkeys, and captcha are not handled.
 
 ## Network behavior
 
