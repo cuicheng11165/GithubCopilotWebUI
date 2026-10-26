@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import path from "node:path";
 import { CopilotClient, defineTool, type CopilotSession, type PermissionRequest, type PermissionRequestResult, type Tool } from "@github/copilot-sdk";
 import {
+  CONTINUE_PERMISSION_SCOPE,
   shouldAutoApprove,
   type ApprovalMode as ContractApprovalMode,
   type ApprovalScope
@@ -28,7 +29,8 @@ import { lastAssistantContent } from "./assistant-response.js";
 import { resolvePythonLauncher } from "./platform.js";
 import { postSandboxJson } from "./sandbox-client.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sessionStatusAfterInterrupt, TurnTimeoutError, waitForTurn } from "./turn-control.js";
+import { ToolRoundBudget } from "./tool-round-budget.js";
+import { classifyPermissionPoll, CONTINUE_EXPIRED_MESSAGE, CONTINUE_STOPPED_MESSAGE, continueCheckpointCopy, INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sdkTurnWaitMs, sessionStatusAfterInterrupt, TurnTimeoutError, waitForTurn, type TurnClock } from "./turn-control.js";
 import { z } from "zod";
 
 const booleanEnvironmentValue = z.enum(["true", "false"]).default("false").transform((value) => value === "true");
@@ -49,6 +51,7 @@ const workerEnvSchema = z.object({
   LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl"),
   TURN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(24 * 60 * 60 * 1000).default(15 * 60 * 1000),
   TURN_LEASE_MS: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
+  MAX_TOOL_ROUNDS_BEFORE_CONFIRM: z.coerce.number().int().min(0).max(10_000).default(25),
   COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   SANDBOX_REQUEST_TIMEOUT_BUFFER_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   API_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
@@ -257,17 +260,27 @@ async function prepareSkillView(sessionId: string, skills: Awaited<ReturnType<ty
   return directories;
 }
 
-async function waitForPermission(sessionId: string, turnId: string, scope: ApprovalScope, intention: string, display: string, payload: Record<string, unknown>): Promise<boolean> {
-  const current = await db.chatSession.findUniqueOrThrow({ where: { id: sessionId } });
-  const mode: ContractApprovalMode = current.approvalMode === ApprovalMode.ALLOW_ALL ? "allow-all" : current.approvalMode === ApprovalMode.SESSION_SCOPED ? "session-scoped" : "interactive";
-  const autoApprove = shouldAutoApprove(mode, approvalScopesFromDb(current.approvalScopes), scope);
-  if (autoApprove) {
-    await db.auditLog.create({ data: { userId: current.userId, action: "permission.auto-approved", targetId: sessionId, metadata: { scope } } });
-    return true;
-  }
+type ManualPermissionOutcome = "approved" | "denied" | "expired" | "cancelled";
 
+async function readPermissionPoll(permissionId: string, turnId: string) {
+  const [permissionRow, turn] = await Promise.all([
+    db.permissionRequest.findUnique({ where: { id: permissionId }, select: { status: true } }),
+    db.turn.findUnique({ where: { id: turnId }, select: { status: true } })
+  ]);
+  return { permissionStatus: permissionRow?.status ?? null, turnStatus: turn?.status ?? null };
+}
+
+async function waitForManualPermission(
+  sessionId: string,
+  turnId: string,
+  scope: string,
+  intention: string,
+  display: string,
+  payload: Record<string, unknown>,
+  resumeAfterDecision: boolean
+): Promise<ManualPermissionOutcome> {
   const owned = await db.turn.findFirst({ where: { id: turnId, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } }, select: { id: true } });
-  if (!owned) return false;
+  if (!owned) return "cancelled";
   const permission = await db.permissionRequest.create({ data: {
     sdkRequestId: randomUUID(),
     sessionId,
@@ -284,7 +297,7 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
   });
   if (waiting.count === 0) {
     await db.permissionRequest.updateMany({ where: { id: permission.id, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } });
-    return false;
+    return "cancelled";
   }
   await db.chatSession.update({ where: { id: sessionId }, data: { status: SessionStatus.WAITING_APPROVAL } });
   await appendEvent(sessionId, turnId, "permission.requested", {
@@ -298,34 +311,56 @@ async function waitForPermission(sessionId: string, turnId: string, scope: Appro
     expiresAt: permission.expiresAt.toISOString()
   });
 
-  let approved = false;
-  while (Date.now() < permission.expiresAt.getTime()) {
-    const [latestPermission, latestTurn] = await Promise.all([
-      db.permissionRequest.findUnique({ where: { id: permission.id }, select: { status: true } }),
-      db.turn.findUnique({ where: { id: turnId }, select: { status: true } })
-    ]);
-    if (!latestPermission || latestPermission.status !== PermissionStatus.PENDING) {
-      approved = latestPermission?.status === PermissionStatus.APPROVED;
-      break;
-    }
-    if (!latestTurn || latestTurn.status === TurnStatus.STOPPED || latestTurn.status === TurnStatus.INTERRUPTED || latestTurn.status === TurnStatus.TIMED_OUT || latestTurn.status === TurnStatus.FAILED) break;
+  let snapshot = await readPermissionPoll(permission.id, turnId);
+  while (Date.now() < permission.expiresAt.getTime() && classifyPermissionPoll(snapshot.permissionStatus, snapshot.turnStatus) === "pending") {
     await new Promise((resolve) => setTimeout(resolve, env.WORKER_POLL_INTERVAL_MS));
+    snapshot = await readPermissionPoll(permission.id, turnId);
   }
-  const latest = await db.permissionRequest.findUnique({ where: { id: permission.id } });
-  if (latest?.status === PermissionStatus.APPROVED) approved = true;
-  if (latest?.status === PermissionStatus.PENDING) {
-    await db.permissionRequest.update({ where: { id: permission.id }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } });
-    await appendEvent(sessionId, turnId, "permission.completed", { requestId: permission.id, decision: "expired" });
+  snapshot = await readPermissionPoll(permission.id, turnId);
+  if (classifyPermissionPoll(snapshot.permissionStatus, snapshot.turnStatus) === "cancelled") {
+    if (snapshot.permissionStatus === PermissionStatus.PENDING) {
+      const expired = await db.permissionRequest.updateMany({
+        where: { id: permission.id, status: PermissionStatus.PENDING },
+        data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() }
+      });
+      if (expired.count > 0) await appendEvent(sessionId, turnId, "permission.completed", { requestId: permission.id, decision: "expired", reason: "turn-ended" });
+    }
+    return "cancelled";
   }
-  const latestTurn = await db.turn.findUnique({ where: { id: turnId }, select: { status: true } });
-  if (!latestTurn || latestTurn.status !== TurnStatus.WAITING_APPROVAL) return false;
+
+  let outcome: ManualPermissionOutcome;
+  if (snapshot.permissionStatus === PermissionStatus.APPROVED) outcome = "approved";
+  else if (snapshot.permissionStatus === PermissionStatus.DENIED) outcome = "denied";
+  else {
+    if (snapshot.permissionStatus === PermissionStatus.PENDING) {
+      await db.permissionRequest.update({ where: { id: permission.id }, data: { status: PermissionStatus.EXPIRED, decidedAt: new Date() } });
+      await appendEvent(sessionId, turnId, "permission.completed", { requestId: permission.id, decision: "expired" });
+    }
+    outcome = "expired";
+  }
+  // Continue checkpoints stay in WAITING_APPROVAL when declined so the turn can be marked stopped.
+  // Tool approvals resume even after a denial, because only that tool call is rejected.
+  // Waiting keeps the lease renewable: renewLeases includes WAITING_APPROVAL.
+  if (!(resumeAfterDecision || outcome === "approved")) return outcome;
   const resumed = await db.turn.updateMany({
     where: { id: turnId, leaseOwner: workerId, status: TurnStatus.WAITING_APPROVAL },
     data: { status: TurnStatus.RUNNING }
   });
-  if (resumed.count === 0) return false;
+  if (resumed.count === 0) return "cancelled";
   await db.chatSession.updateMany({ where: { id: sessionId, status: SessionStatus.WAITING_APPROVAL }, data: { status: SessionStatus.RUNNING } });
-  return approved;
+  return outcome;
+}
+
+async function waitForPermission(sessionId: string, turnId: string, scope: ApprovalScope, intention: string, display: string, payload: Record<string, unknown>): Promise<boolean> {
+  const current = await db.chatSession.findUniqueOrThrow({ where: { id: sessionId } });
+  const mode: ContractApprovalMode = current.approvalMode === ApprovalMode.ALLOW_ALL ? "allow-all" : current.approvalMode === ApprovalMode.SESSION_SCOPED ? "session-scoped" : "interactive";
+  const autoApprove = shouldAutoApprove(mode, approvalScopesFromDb(current.approvalScopes), scope);
+  if (autoApprove) {
+    await db.auditLog.create({ data: { userId: current.userId, action: "permission.auto-approved", targetId: sessionId, metadata: { scope } } });
+    return true;
+  }
+  const outcome = await waitForManualPermission(sessionId, turnId, scope, intention, display, payload, true);
+  return outcome === "approved";
 }
 
 function permissionHandler(sessionId: string, turnId: string) {
@@ -434,7 +469,7 @@ async function detectRepositoryCommand(repository: RepositoryConfig, kind: "test
   throw new Error(`No supported repository ${kind === "tests" ? "test" : "diagnostics"} task was detected`);
 }
 
-function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>[] {
+function createTools(repository: RepositoryConfig, sessionId: string, beforeHandler?: () => Promise<void>): Tool<any>[] {
   return [
     defineTool<{ path?: string; depth?: number }>("repo_tree", {
       description: "List files and directories in the configured live repository.", parameters: rawSchemas.tree, skipPermission: true, defer: "never",
@@ -519,7 +554,14 @@ function createTools(repository: RepositoryConfig, sessionId: string): Tool<any>
         });
       }
     })
-  ].map((tool) => ({ ...tool, overridesBuiltInTool: true }));
+  ].map((tool) => ({
+    ...tool,
+    overridesBuiltInTool: true,
+    handler: async (args: any, invocation: any) => {
+      if (beforeHandler) await beforeHandler();
+      return tool.handler?.(args, invocation);
+    }
+  }));
 }
 
 interface TurnJobLike {
@@ -538,6 +580,8 @@ async function runTurn(job: TurnJobLike) {
   ownedTurnIds.add(job.data.turnId);
   let sdkSession: CopilotSession | undefined;
   let turnLogger = logger.child({ sessionId: job.data.sessionId });
+  const checkpointStop: { message: string | null } = { message: null };
+  let turnClock: TurnClock | undefined;
   try {
     const turn = await db.turn.findUniqueOrThrow({ where: { id: job.data.turnId }, include: { session: { include: { githubAccount: true } }, messages: { where: { role: MessageRole.USER }, orderBy: { createdAt: "asc" }, take: 1 } } });
     turnLogger = logger.child({ userId: turn.session.userId, sessionId: turn.session.id, turnId: turn.id });
@@ -556,7 +600,43 @@ async function runTurn(job: TurnJobLike) {
     await appendEvent(turn.session.id, turn.id, "turn.started", { branch: git.branch, headSha: git.headSha, dirty: git.dirty });
     const token = await accessTokenForAccount(turn.session.githubAccount.id, Math.max(5 * 60 * 1000, env.TURN_TIMEOUT_MS));
     const client = await getCopilotClient(turn.session.githubAccount.host);
-    const tools = createTools(repository, turn.session.id);
+    const checkpointsEnabled = env.MAX_TOOL_ROUNDS_BEFORE_CONFIRM > 0;
+    const budget = new ToolRoundBudget(env.MAX_TOOL_ROUNDS_BEFORE_CONFIRM, async (completedRounds) => {
+      turnClock?.pause();
+      try {
+        const copy = continueCheckpointCopy(completedRounds);
+        const outcome = await waitForManualPermission(turn.session.id, turn.id, CONTINUE_PERMISSION_SCOPE, copy.intention, copy.display, {
+          completedRounds,
+          limit: env.MAX_TOOL_ROUNDS_BEFORE_CONFIRM
+        }, false);
+        if (outcome === "approved") return true;
+        if (!shuttingDown && (outcome === "denied" || outcome === "expired")) {
+          checkpointStop.message = outcome === "denied" ? CONTINUE_STOPPED_MESSAGE : CONTINUE_EXPIRED_MESSAGE;
+          stopRequested.add(turn.session.id);
+        }
+        return false;
+      } finally {
+        turnClock?.resume();
+      }
+    });
+    const stopForCheckpoint = async () => {
+      if (checkpointStop.message) stopRequested.add(turn.session.id);
+      await sdkSession?.abort().catch(() => undefined);
+      await sandboxRequest(`/sessions/${turn.session.id}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
+    };
+    const beforeHandler = async () => {
+      const allowed = await budget.beforeHandler();
+      if (allowed) return;
+      await stopForCheckpoint();
+      throw new Error(checkpointStop.message ?? "The turn was stopped");
+    };
+    const guardTool = async () => {
+      const allowed = await budget.beforeHook();
+      if (allowed) return undefined;
+      await stopForCheckpoint();
+      return { permissionDecision: "deny" as const, permissionDecisionReason: checkpointStop.message ?? "The turn was stopped" };
+    };
+    const tools = checkpointsEnabled ? createTools(repository, turn.session.id, beforeHandler) : createTools(repository, turn.session.id);
     const skillDirectories = await prepareSkillView(turn.session.id, skills);
     const sessionOptions = {
       model: turn.session.model,
@@ -573,7 +653,13 @@ async function runTurn(job: TurnJobLike) {
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },
       systemMessage: { mode: "append" as const, content: "You are working with a live repository. Use view, rg, glob, and repo_tree for inspection; use apply_patch for focused edits; use problems and runTests for standard validation. Approved bash commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Clearly report changes and validation results." },
-      onPermissionRequest: permissionHandler(turn.session.id, turn.id)
+      onPermissionRequest: permissionHandler(turn.session.id, turn.id),
+      ...(checkpointsEnabled ? {
+        hooks: {
+          onPreToolUse: () => guardTool(),
+          onPreMcpToolCall: async () => { await guardTool(); }
+        }
+      } : {})
     };
     const metadata = await client.getSessionMetadata(turn.session.sdkSessionId);
     sdkSession = metadata ? await client.resumeSession(turn.session.sdkSessionId, sessionOptions) : await client.createSession({ ...sessionOptions, sessionId: turn.session.sdkSessionId });
@@ -591,6 +677,10 @@ async function runTurn(job: TurnJobLike) {
         }).catch((error) => turnLogger.error(error, "Failed to persist LLM trace event"));
       }
       if (event.type === "assistant.message") {
+        if (checkpointsEnabled) {
+          const toolRequests = event.data.toolRequests;
+          if (Array.isArray(toolRequests)) budget.observeToolRound(toolRequests.length);
+        }
         latestAssistantContent = String(event.data.content ?? "");
         return;
       }
@@ -643,12 +733,18 @@ async function runTurn(job: TurnJobLike) {
     if (!prompt) throw new Error("Turn has no user message");
     await waitForTurn({
       timeoutMs: env.TURN_TIMEOUT_MS,
+      sdkTimeoutMs: sdkTurnWaitMs(env.TURN_TIMEOUT_MS, env.APPROVAL_TIMEOUT_SECONDS * 1000, checkpointsEnabled),
+      onClock: (clock) => { turnClock = clock; },
       send: (timeoutMs) => sdkSession!.sendAndWait({ prompt }, timeoutMs),
       abort: async () => {
         await sdkSession?.abort().catch(() => undefined);
         await sandboxRequest(`/sessions/${turn.session.id}/stop`, undefined, SANDBOX_STOP_TIMEOUT_MS).catch(() => undefined);
       }
     });
+    if (checkpointStop.message) {
+      stopRequested.add(turn.session.id);
+      throw new Error(checkpointStop.message);
+    }
     const events = await sdkSession.getEvents();
     const currentTurnEvents = events.slice(eventOffset);
     const content = lastAssistantContent(currentTurnEvents as unknown as Array<{ type: string; data?: { content?: unknown } }>) ?? latestAssistantContent;
@@ -675,9 +771,9 @@ async function runTurn(job: TurnJobLike) {
     await appendEvent(turn.session.id, turn.id, "turn.completed", { title: titleUpdate.title ?? turn.session.title });
     turnLogger.info("Turn processing completed");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown worker error";
-    const timedOut = error instanceof TurnTimeoutError;
-    const stopped = !timedOut && (stopRequested.has(job.data.sessionId) || message.toLowerCase().includes("abort"));
+    const message = checkpointStop.message ?? (error instanceof Error ? error.message : "Unknown worker error");
+    const timedOut = checkpointStop.message === null && error instanceof TurnTimeoutError;
+    const stopped = checkpointStop.message !== null || (!timedOut && (stopRequested.has(job.data.sessionId) || message.toLowerCase().includes("abort")));
     const outcome = timedOut ? TurnStatus.TIMED_OUT : stopped ? TurnStatus.STOPPED : TurnStatus.FAILED;
     const updated = await db.turn.updateMany({
       where: { id: job.data.turnId, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
@@ -687,14 +783,14 @@ async function runTurn(job: TurnJobLike) {
       const latest = await db.turn.findUnique({ where: { id: job.data.turnId }, select: { status: true } });
       if (latest?.status === TurnStatus.STOPPED) {
         await db.chatSession.updateMany({ where: { id: job.data.sessionId, status: { in: [SessionStatus.RUNNING, SessionStatus.WAITING_APPROVAL, SessionStatus.QUEUED] } }, data: { status: SessionStatus.IDLE } });
-        await appendEvent(job.data.sessionId, job.data.turnId, "turn.stopped", { error: message });
+        await appendEvent(job.data.sessionId, job.data.turnId, "turn.stopped", { error: message, ...(checkpointStop.message ? { reason: "continue-checkpoint" } : {}) });
         turnLogger.info({ error: message }, "Turn processing stopped");
       } else turnLogger.warn({ error: message, status: latest?.status }, "Turn ended after its lease was lost");
       return;
     }
     await db.chatSession.update({ where: { id: job.data.sessionId }, data: { status: stopped ? SessionStatus.IDLE : SessionStatus.ERROR } });
     const kind = timedOut ? "turn.timed_out" : stopped ? "turn.stopped" : "turn.failed";
-    await appendEvent(job.data.sessionId, job.data.turnId, kind, { error: message, ...(timedOut ? { reason: "timeout" } : {}) });
+    await appendEvent(job.data.sessionId, job.data.turnId, kind, { error: message, ...(timedOut ? { reason: "timeout" } : {}), ...(checkpointStop.message ? { reason: "continue-checkpoint" } : {}) });
     if (stopped) turnLogger.info({ error: message }, "Turn processing stopped");
     else if (timedOut) turnLogger.warn({ error: message }, "Turn processing timed out");
     else turnLogger.error(error, "Turn processing failed");
@@ -828,6 +924,8 @@ async function recoverExpiredLeases() {
 async function renewLeases() {
   if (ownedTurnIds.size === 0) return;
   const ids = [...ownedTurnIds];
+  // WAITING_APPROVAL covers tool approvals and continue checkpoints, so the lease stays
+  // renewed while the user is deciding and that wait is outside the turn clock.
   await db.turn.updateMany({
     where: { id: { in: ids }, leaseOwner: workerId, status: { in: [TurnStatus.RUNNING, TurnStatus.WAITING_APPROVAL] } },
     data: { leaseExpiresAt: new Date(Date.now() + env.TURN_LEASE_MS) }

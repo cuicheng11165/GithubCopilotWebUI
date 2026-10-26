@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createStreamCursorState, eventTurnNotice, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice } from "./stream-state.js";
+import { createStreamCursorState, eventTurnNotice, reducePermissions, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice } from "./stream-state.js";
 
 const turnId = "11111111-1111-4111-8111-111111111111";
 const otherTurnId = "22222222-2222-4222-8222-222222222222";
@@ -66,7 +66,29 @@ describe("turn notices", () => {
       { status: "interrupted", error: "Send a new message to retry.", createdAt: "2026-10-24T12:00:00.000Z" },
       { status: "queued", error: null, createdAt: "2026-10-24T12:06:00.000Z" }
     ])).toBeNull();
+    expect(visibleTurnNotice([
+      { status: "stopped", error: "You stopped this turn at the continue prompt. Send a new message if you want to keep going.", createdAt: "2026-10-24T12:07:00.000Z" }
+    ])).toEqual({ tone: "warning", message: "You stopped this turn at the continue prompt. Send a new message if you want to keep going." });
+    expect(visibleTurnNotice([
+      { status: "stopped", error: null, createdAt: "2026-10-24T12:08:00.000Z" }
+    ])).toBeNull();
     expect(eventTurnNotice("turn.interrupted", "Send a new message to retry.")?.tone).toBe("warning");
     expect(eventTurnNotice("turn.failed", "Model is not allowed")?.tone).toBe("error");
+    expect(eventTurnNotice("turn.stopped", "You stopped this turn at the continue prompt.", "continue-checkpoint")?.message).toContain("continue prompt");
+    expect(eventTurnNotice("turn.stopped", "The operation was aborted")).toBeNull();
+  });
+});
+
+describe("permission replay", () => {
+  it("keeps a single continue card when the pending prompt is loaded and the stream is replayed", () => {
+    const pending = { id: "pending", scope: "continue", intention: "Continue this turn?" };
+    let permissions = [pending];
+    permissions = reducePermissions(permissions, { kind: "permission.requested", data: { id: "old", scope: "shell", intention: "Run tests" } });
+    permissions = reducePermissions(permissions, { kind: "permission.completed", data: { requestId: "old", decision: "approve-once" } });
+    permissions = reducePermissions(permissions, { kind: "permission.requested", data: pending });
+    permissions = reducePermissions(permissions, { kind: "permission.requested", data: pending });
+    expect(permissions).toEqual([pending]);
+    permissions = reducePermissions(permissions, { kind: "permission.completed", data: { requestId: "pending", decision: "expired" } });
+    expect(permissions).toEqual([]);
   });
 });

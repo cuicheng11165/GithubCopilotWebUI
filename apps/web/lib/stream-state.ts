@@ -55,8 +55,23 @@ export function reduceStreamEvent(state: StreamCursorState, event: StreamEventIn
 const noticeTone: Record<string, "warning" | "error"> = {
   "timed-out": "warning",
   interrupted: "warning",
-  failed: "error"
+  failed: "error",
+  stopped: "warning"
 };
+
+export function reducePermissions<T extends { id: string }>(current: readonly T[], event: { kind: string; data?: Record<string, unknown> }): T[] {
+  if (event.kind === "permission.requested") {
+    const id = typeof event.data?.id === "string" ? event.data.id : "";
+    if (!id) return [...current];
+    return [...current.filter((item) => item.id !== id), event.data as T];
+  }
+  if (event.kind === "permission.completed") {
+    const requestId = typeof event.data?.requestId === "string" ? event.data.requestId : "";
+    if (!requestId) return [...current];
+    return current.filter((item) => item.id !== requestId);
+  }
+  return [...current];
+}
 
 export function visibleTurnNotice(turns: Array<Pick<TurnSummary, "status" | "error" | "createdAt">>): { tone: "warning" | "error"; message: string } | null {
   const latest = [...turns].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1);
@@ -66,7 +81,12 @@ export function visibleTurnNotice(turns: Array<Pick<TurnSummary, "status" | "err
   return { tone, message: latest.error };
 }
 
-export function eventTurnNotice(kind: string, error: unknown): { tone: "warning" | "error"; message: string } | null {
+export function eventTurnNotice(kind: string, error: unknown, reason?: unknown): { tone: "warning" | "error"; message: string } | null {
+  if (kind === "turn.stopped") {
+    if (reason !== "continue-checkpoint") return null;
+    const message = typeof error === "string" && error.trim() ? error : "This turn stopped at the continue prompt.";
+    return { tone: "warning", message };
+  }
   if (kind !== "turn.timed_out" && kind !== "turn.interrupted" && kind !== "turn.failed") return null;
   const message = typeof error === "string" && error.trim() ? error : kind === "turn.timed_out"
     ? "This turn timed out. Send a new message to continue."

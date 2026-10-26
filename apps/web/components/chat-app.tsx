@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bot, ChevronDown, Github, LogOut, Menu, Pencil, Plus, Send, Shield, ShieldAlert, Square, Trash2, X } from "lucide-react";
 import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
 import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions, getSessionTrace } from "../lib/api";
-import { createStreamCursorState, eventTurnNotice, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice, type StreamEventInput } from "../lib/stream-state";
+import { createStreamCursorState, eventTurnNotice, reducePermissions, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice, type StreamEventInput } from "../lib/stream-state";
 import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
@@ -113,8 +113,12 @@ export function ChatApp() {
             }
           } : item));
         }
-        if (payload.kind === "permission.requested") setPermissions((current) => [...current.filter((item) => item.id !== data.id), data as unknown as PermissionRequest]);
-        if (payload.kind === "permission.completed") setPermissions((current) => current.filter((item) => item.id !== data.requestId));
+        if (payload.kind === "permission.requested" || payload.kind === "permission.completed") {
+          setPermissions((current) => reducePermissions(current, payload));
+          if (payload.kind === "permission.completed" && data.decision === "approve-once") {
+            setSessions((current) => current.map((item) => item.id === activeId && item.status === "waiting-approval" ? { ...item, status: "running" } : item));
+          }
+        }
         if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
         if (payload.kind === "turn.started") {
           setTurnNotice(null);
@@ -122,10 +126,10 @@ export function ChatApp() {
           setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
         }
         if (payload.kind === "permission.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
-        const notice = eventTurnNotice(payload.kind, data.error);
+        const notice = eventTurnNotice(payload.kind, data.error, data.reason);
         if (notice) {
           setTurnNotice(notice);
-          setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "error" } : item));
+          setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: payload.kind === "turn.stopped" ? "idle" : "error" } : item));
         }
         if (payload.kind === "turn.completed") setTurnNotice(null);
         if (["turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted"].includes(payload.kind)) {

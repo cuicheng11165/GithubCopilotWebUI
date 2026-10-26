@@ -91,6 +91,7 @@ button { color: inherit; }
 .message-content table { border-collapse: collapse; width: 100%; font-size: 12px; }
 .message-content th, .message-content td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; }
 .permission-card { border: 1px solid #e7cda7; background: #fffbf4; border-radius: 12px; display: flex; gap: 12px; padding: 14px; margin: 0 0 24px 42px; }
+.permission-card.continue { border-color: #b7d4c3; background: #f4fbf7; }
 .tool-activity-group { margin: -10px 0 24px 42px; border: 1px solid #dce3de; background: #f8faf8; border-radius: 8px; overflow: hidden; }
 .tool-activity-group.has-errors { border-color: #edcfcc; background: #fff9f8; }
 .tool-activity-header { width: 100%; min-height: 42px; border: 0; background: transparent; display: flex; align-items: center; gap: 9px; padding: 6px 11px; color: var(--green); text-align: left; cursor: pointer; }

@@ -180,6 +180,7 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 - 为 Agent 注册项目定义的工具，包括仓库只读工具和受审批执行工具。
 - 将 Assistant 增量、完整回复、工具开始/完成、审批请求、Turn 完成/失败等写入事件表。
 - 处理停止请求、会话删除请求，并在租约过期后把 Turn 标为中断而不是自动重跑。
+- 在一个 Turn 完成 `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` 轮工具调用后暂停，并通过现有审批卡片询问是否继续。继续会重置计数；停止或审批超时则把 Turn 标为已停止。等待确认的时间不计入 Turn 超时，租约在等待期间保持续期。
 
 ### `apps/sandbox-runner`：本机执行代理
 
@@ -263,6 +264,8 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 4. Web 展示审批卡片。
 5. 用户批准或拒绝后，API 更新审批状态并写入事件。
 6. Worker 继续执行或拒绝该工具调用。
+
+同一套审批记录也用于工具轮次检查点。达到 `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` 后，聊天界面显示 Continue / Stop。用户停止或在审批超时前没有回应时，Turn 以 stopped 结束，而不是失败。刷新页面会按同一条未决记录重放，不会再弹出一张重复卡片。
 
 ## 目录速览
 
@@ -470,6 +473,7 @@ Main responsibilities:
 - Register project-defined tools for the Agent, including read-only repository tools and approval-gated execution tools.
 - Write Assistant deltas, complete replies, tool start/completion events, approval requests, Turn completion/failure, and related events.
 - Handle stop requests, session deletion, and expired-lease recovery without replaying interrupted turns.
+- Pause a turn after `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` tool rounds and ask whether to continue through the existing approval card. Continue resets the counter. Stop, or no answer before the approval timeout, marks the turn stopped. Time spent waiting does not count toward the turn timeout, and the lease stays renewed while the prompt is open.
 
 ### `apps/sandbox-runner`: Local Execution Proxy
 
@@ -553,6 +557,8 @@ Main responsibilities:
 4. Web displays an approval card.
 5. After the user approves or rejects the request, the API updates approval state and writes an event.
 6. The Worker continues execution or rejects the tool call.
+
+The same approval record is used for the tool-round checkpoint. After `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` rounds, the chat shows Continue / Stop. If the user stops, or does not answer before the approval timeout, the turn ends as stopped rather than failed. Refreshing the page replays that same pending record and does not open a second card.
 
 ## Directory Overview
 
