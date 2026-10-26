@@ -61,7 +61,61 @@ export function sdkTurnWaitMs(turnTimeoutMs: number, approvalTimeoutMs: number, 
   return Math.min(MAX_SDK_WAIT_MS, Math.max(turnTimeoutMs, total));
 }
 
+export function createActiveTurnClock(budgetMs: number, now: () => number = Date.now): ActiveTurnClock {
+  const startedAt = now();
+  let pausedAt: number | null = null;
+  let pausedMs = 0;
+  let local = 0;
+  let external = false;
+  const sync = (at = now()) => {
+    const shouldPause = local > 0 || external;
+    if (shouldPause && pausedAt === null) pausedAt = at;
+    if (!shouldPause && pausedAt !== null) {
+      pausedMs += at - pausedAt;
+      pausedAt = null;
+    }
+  };
+  return {
+    hold() { local += 1; sync(); },
+    release() { local = Math.max(0, local - 1); sync(); },
+    setExternal(paused: boolean) {
+      if (external === paused) return;
+      external = paused;
+      sync();
+    },
+    isPaused() { return pausedAt !== null; },
+    remainingMs(at = now()) {
+      const live = pausedAt === null ? 0 : at - pausedAt;
+      return budgetMs - (at - startedAt - pausedMs - live);
+    }
+  };
+}
+
+export interface ActiveTurnClock {
+  hold(): void;
+  release(): void;
+  setExternal(paused: boolean): void;
+  remainingMs(now?: number): number;
+  isPaused(): boolean;
+}
+
+export function sdkTurnCeilingMs(turnTimeoutMs: number, pauseBudgetMs: number): number {
+  return turnTimeoutMs + pauseBudgetMs;
+}
+
 export async function waitForTurn(input: {
+  timeoutMs: number;
+  sdkTimeoutMs?: number;
+  send: (timeoutMs: number) => Promise<unknown>;
+  abort: () => Promise<void>;
+  onClock?: (clock: TurnClock) => void;
+  clock?: ActiveTurnClock;
+}): Promise<void> {
+  if (input.clock) return waitWithActiveClock(input);
+  return waitWithTurnClock(input);
+}
+
+async function waitWithTurnClock(input: {
   timeoutMs: number;
   sdkTimeoutMs?: number;
   send: (timeoutMs: number) => Promise<unknown>;
@@ -131,6 +185,84 @@ export async function waitForTurn(input: {
     settled = true;
   } finally {
     clearTimer();
+    void sendPromise.catch(() => undefined);
+  }
+}
+
+async function waitWithActiveClock(input: {
+  timeoutMs: number;
+  sdkTimeoutMs?: number;
+  send: (timeoutMs: number) => Promise<unknown>;
+  abort: () => Promise<void>;
+  onClock?: (clock: TurnClock) => void;
+  clock?: ActiveTurnClock;
+}): Promise<void> {
+  const active = input.clock;
+  if (!active) return waitWithTurnClock(input);
+  let settled = false;
+  let heldByTurnClock = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abortOnce = () => {
+    void input.abort().catch(() => undefined);
+  };
+  input.onClock?.({
+    pause() {
+      if (settled || heldByTurnClock) return;
+      heldByTurnClock = true;
+      active.hold();
+    },
+    resume() {
+      if (settled || !heldByTurnClock) return;
+      heldByTurnClock = false;
+      active.release();
+    }
+  });
+  const sendTimeout = input.sdkTimeoutMs ?? input.timeoutMs;
+  const rejectSdkTimeout = (error: unknown): never => {
+    if ((active.isPaused() || active.remainingMs() > 0) && (error instanceof TurnTimeoutError || isSdkTurnTimeout(error))) {
+      settled = true;
+      abortOnce();
+      throw new Error("The agent runtime stopped while this turn was paused for approval or a secure form.");
+    }
+    if (error instanceof TurnTimeoutError || isSdkTurnTimeout(error)) {
+      settled = true;
+      abortOnce();
+      throw new TurnTimeoutError(input.timeoutMs);
+    }
+    throw error;
+  };
+  const sendPromise = input.send(sendTimeout).then(
+    () => undefined,
+    (error: unknown) => {
+      if (settled) return undefined;
+      rejectSdkTimeout(error);
+    }
+  );
+  try {
+    await Promise.race([
+      sendPromise,
+      new Promise<never>((_, reject) => {
+        const check = () => {
+          if (settled) return;
+          if (active.isPaused()) {
+            timer = setTimeout(check, 25);
+            return;
+          }
+          const remaining = active.remainingMs();
+          if (remaining <= 0) {
+            settled = true;
+            abortOnce();
+            reject(new TurnTimeoutError(input.timeoutMs));
+            return;
+          }
+          timer = setTimeout(check, Math.min(remaining, 25));
+        };
+        check();
+      })
+    ]);
+    settled = true;
+  } finally {
+    if (timer) clearTimeout(timer);
     void sendPromise.catch(() => undefined);
   }
 }

@@ -5,6 +5,10 @@ import { randomUUID } from "node:crypto";
 import {
   createSessionSchema,
   permissionDecisionSchema,
+  secureFormClaimBodySchema,
+  secureFormClaimStepBodySchema,
+  secureFormDiscardBodySchema,
+  secureFormLifecycleBodySchema,
   sendMessageSchema,
   updateSessionSchema,
   type ApprovalMode,
@@ -20,7 +24,10 @@ import { config } from "./config.js";
 import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { createSessionEventHub, type HubEvent } from "./session-event-hub.js";
+import { createSecureFormService, SecureFormRequestError } from "./secure-form-service.js";
+import { SecureFormVault } from "./secure-form-vault.js";
 import { turnStatusName } from "./turn-status.js";
+import { z } from "zod";
 
 const app = Fastify({ loggerInstance: createServiceLogger({ service: "api" }) as FastifyBaseLogger });
 app.log.info({ timestampFormat: "ISO 8601 UTC" }, "API session-routed text logging ready");
@@ -139,6 +146,25 @@ async function appendEvent(sessionId: string, turnId: string | null, kind: strin
   sessionEvents.publish([serializeStreamEvent(event)]);
 }
 
+const secureFormService = createSecureFormService({
+  vault: new SecureFormVault(),
+  timeoutSeconds: config.SECURE_FORM_TIMEOUT_SECONDS,
+  appendEvent
+});
+
+function internalAuthorized(authorization: string | string[] | undefined): boolean {
+  if (bearerAuthorizationMatches(authorization, config.WORKER_CONTROL_TOKEN)) return true;
+  const sandboxToken = config.SANDBOX_RUNNER_TOKEN;
+  if (!sandboxToken) return false;
+  return bearerAuthorizationMatches(authorization, sandboxToken);
+}
+
+function secureFormError(error: unknown, reply: FastifyReply, log: FastifyBaseLogger, context: Record<string, unknown>) {
+  if (error instanceof SecureFormRequestError) return reply.code(error.status).header("Cache-Control", "no-store").send({ error: error.message });
+  log.error(context, "Secure form request failed");
+  return reply.code(500).header("Cache-Control", "no-store").send({ error: "Secure form request failed" });
+}
+
 async function rejectPendingPermissions(sessionId: string, userId: string, reason: string) {
   const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
   for (const permission of pending) {
@@ -161,6 +187,94 @@ app.post("/internal/events/notify", async (request, reply) => {
   if (!bearerAuthorizationMatches(request.headers.authorization, config.WORKER_CONTROL_TOKEN)) return reply.code(401).send({ error: "Unauthorized" });
   sessionEvents.notify();
   return { ok: true };
+});
+
+app.post("/internal/secure-forms", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  try {
+    return reply.header("Cache-Control", "no-store").send(await secureFormService.create(request.body));
+  } catch (error) {
+    return secureFormError(error, reply, request.log, {});
+  }
+});
+
+app.get<{ Params: { id: string }; Querystring: { sessionId?: string } }>("/internal/secure-forms/:id", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const parsed = z.object({ id: z.string().uuid(), sessionId: z.string().uuid() }).safeParse({ id: request.params.id, sessionId: request.query.sessionId });
+  if (!parsed.success) return reply.code(400).send({ error: "Invalid secure form lookup" });
+  try {
+    return reply.header("Cache-Control", "no-store").send(await secureFormService.read(parsed.data.sessionId, parsed.data.id));
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: parsed.data.id });
+  }
+});
+
+app.post<{ Params: { id: string } }>("/internal/secure-forms/:id/claim", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const formId = z.string().uuid().safeParse(request.params.id);
+  const body = secureFormClaimBodySchema.safeParse(request.body);
+  if (!formId.success || !body.success) return reply.code(400).header("Cache-Control", "no-store").send({ error: "Invalid secure form claim" });
+  try {
+    return reply.header("Cache-Control", "no-store").send(await secureFormService.claim(body.data.sessionId, formId.data));
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
+});
+
+app.post<{ Params: { id: string } }>("/internal/secure-forms/:id/claim-step", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const formId = z.string().uuid().safeParse(request.params.id);
+  const body = secureFormClaimStepBodySchema.safeParse(request.body);
+  if (!formId.success || !body.success) return reply.code(400).header("Cache-Control", "no-store").send({ error: "Invalid secure form claim" });
+  try {
+    return reply.header("Cache-Control", "no-store").send(await secureFormService.claimStep(body.data.sessionId, formId.data, body.data.stepId));
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
+});
+
+app.post<{ Params: { id: string } }>("/internal/secure-forms/:id/cancel", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const formId = z.string().uuid().safeParse(request.params.id);
+  const body = secureFormLifecycleBodySchema.safeParse(request.body);
+  if (!formId.success || !body.success) return reply.code(400).send({ error: "Invalid secure form cancel" });
+  try {
+    const snapshot = await secureFormService.cancel(body.data.sessionId, formId.data, body.data.reason);
+    return { status: snapshot.status };
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
+});
+
+app.post<{ Params: { id: string } }>("/internal/secure-forms/:id/expire", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const formId = z.string().uuid().safeParse(request.params.id);
+  const body = secureFormLifecycleBodySchema.safeParse(request.body);
+  if (!formId.success || !body.success) return reply.code(400).send({ error: "Invalid secure form expiry" });
+  try {
+    const snapshot = await secureFormService.expire(body.data.sessionId, formId.data, body.data.reason);
+    return { status: snapshot.status };
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
+});
+
+app.post("/internal/secure-forms/cancel", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const body = secureFormLifecycleBodySchema.safeParse(request.body);
+  if (!body.success) return reply.code(400).send({ error: "Invalid secure form cancel" });
+  const cancelled = await secureFormService.cancelPending({
+    sessionId: body.data.sessionId,
+    ...(body.data.turnId ? { turnId: body.data.turnId } : {})
+  }, body.data.reason);
+  return { cancelled };
+});
+
+app.post("/internal/secure-forms/discard", async (request, reply) => {
+  if (!internalAuthorized(request.headers.authorization)) return reply.code(401).send({ error: "Unauthorized" });
+  const body = secureFormDiscardBodySchema.safeParse(request.body);
+  if (!body.success) return reply.code(400).send({ error: "Invalid secure form discard" });
+  return { discarded: secureFormService.discard(body.data.formIds) };
 });
 app.get("/health/ready", async (_request, reply) => {
   try {
@@ -283,6 +397,7 @@ app.post("/api/auth/logout", async (request, reply) => {
       db.chatSession.update({ where: { id: session.id }, data: { status: SessionStatus.IDLE } })
     ]);
     await rejectPendingPermissions(session.id, auth.user.id, "logout");
+    await secureFormService.cancelPending({ sessionId: session.id }, "logout");
     await requestWorkerStop(session, auth.user.id, "logout").catch((error) => request.log.error(error, "Failed to stop Session during logout"));
   }
   await db.webSession.delete({ where: { id: auth.webSession.id } });
@@ -378,6 +493,7 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) 
       status: permission.status.toLowerCase(),
       expiresAt: permission.expiresAt.toISOString()
     })),
+    secureForms: await secureFormService.listForSession(session.id),
     skills: session.skillManifest ?? []
   };
 });
@@ -456,6 +572,7 @@ app.delete<{ Params: { id: string } }>("/api/sessions/:id", async (request, repl
       db.chatSession.update({ where: { id: session.id }, data: { status: SessionStatus.IDLE } })
     ]);
     await rejectPendingPermissions(session.id, auth.user.id, "delete");
+    await secureFormService.cancelPending({ sessionId: session.id }, "delete");
     try {
       await workerRequest(`/sessions/${session.id}/delete`, { sdkSessionId: session.sdkSessionId, requestedBy: auth.user.id }, 45_000);
     } catch (error) {
@@ -507,6 +624,7 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/stop", async (request, r
     db.chatSession.update({ where: { id: session.id }, data: { status: SessionStatus.IDLE } })
   ]);
   await rejectPendingPermissions(session.id, auth.user.id, "stop");
+  await secureFormService.cancelPending({ sessionId: session.id }, "stop");
   await requestWorkerStop(session, auth.user.id, "stop").catch((error) => request.log.error(error, "Failed to signal Worker stop"));
   return reply.code(202).send({ status: "stopping" });
 });
@@ -528,6 +646,38 @@ app.post<{ Params: { id: string; requestId: string } }>("/api/sessions/:id/permi
   ]);
   await appendEvent(session.id, permission.turnId, "permission.completed", { requestId: permission.id, decision: parsed.data.decision });
   return { status: parsed.data.decision };
+});
+
+app.post<{ Params: { id: string; formId: string } }>("/api/sessions/:id/secure-forms/:formId/submit", async (request, reply) => {
+  const auth = await authenticate(request, reply);
+  if (!(auth && "user" in auth)) return;
+  const session = await ownedSession(auth.user.id, request.params.id);
+  if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
+  const formId = z.string().uuid().safeParse(request.params.formId);
+  if (!formId.success) return reply.code(400).header("Cache-Control", "no-store").send({ error: "Invalid secure form id" });
+  try {
+    const result = await secureFormService.submit(auth.user.id, session.id, formId.data, request.body);
+    return reply.header("Cache-Control", "no-store").send(result);
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
+});
+
+app.post<{ Params: { id: string; formId: string } }>("/api/sessions/:id/secure-forms/:formId/cancel", async (request, reply) => {
+  const auth = await authenticate(request, reply);
+  if (!(auth && "user" in auth)) return;
+  const session = await ownedSession(auth.user.id, request.params.id);
+  if (!session) return reply.code(404).send({ error: "Session not found" });
+  bindSessionLog(request, auth.user.id, session.id);
+  const formId = z.string().uuid().safeParse(request.params.formId);
+  if (!formId.success) return reply.code(400).header("Cache-Control", "no-store").send({ error: "Invalid secure form id" });
+  try {
+    const snapshot = await secureFormService.cancel(session.id, formId.data, "user");
+    return reply.header("Cache-Control", "no-store").send({ status: snapshot.status });
+  } catch (error) {
+    return secureFormError(error, reply, request.log, { formId: formId.data });
+  }
 });
 
 app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessions/:id/events", async (request, reply) => {
@@ -573,4 +723,5 @@ app.addHook("onClose", async () => {
   ]);
 });
 
+await secureFormService.expireAllPending("api-restart");
 await app.listen({ host: config.API_HOST, port: config.API_PORT });

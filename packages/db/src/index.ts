@@ -5,12 +5,14 @@ export const SessionStatus = { IDLE: "IDLE", QUEUED: "QUEUED", RUNNING: "RUNNING
 export const TurnStatus = { QUEUED: "QUEUED", RUNNING: "RUNNING", WAITING_APPROVAL: "WAITING_APPROVAL", COMPLETED: "COMPLETED", STOPPED: "STOPPED", FAILED: "FAILED", TIMED_OUT: "TIMED_OUT", INTERRUPTED: "INTERRUPTED" } as const;
 export const MessageRole = { USER: "USER", ASSISTANT: "ASSISTANT", SYSTEM: "SYSTEM", TOOL: "TOOL" } as const;
 export const PermissionStatus = { PENDING: "PENDING", APPROVED: "APPROVED", DENIED: "DENIED", EXPIRED: "EXPIRED" } as const;
+export const SecureFormStatus = { PENDING: "PENDING", SUBMITTED: "SUBMITTED", CANCELLED: "CANCELLED", EXPIRED: "EXPIRED" } as const;
 
 export type ApprovalMode = typeof ApprovalMode[keyof typeof ApprovalMode];
 export type SessionStatus = typeof SessionStatus[keyof typeof SessionStatus];
 export type TurnStatus = typeof TurnStatus[keyof typeof TurnStatus];
 export type MessageRole = typeof MessageRole[keyof typeof MessageRole];
 export type PermissionStatus = typeof PermissionStatus[keyof typeof PermissionStatus];
+export type SecureFormStatus = typeof SecureFormStatus[keyof typeof SecureFormStatus];
 
 export function validateDatabaseUrl(url: string): void {
   if (!url.startsWith("file:")) throw new Error("GithubCopilotWebUI requires a SQLite DATABASE_URL beginning with file:");

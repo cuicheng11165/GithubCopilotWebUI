@@ -18,12 +18,12 @@ describe("sanitizeToolEventForLog", () => {
     expect(sanitizeToolEventForLog({
       arguments: {
         authorization: "Bearer secret",
-        nested: { accessToken: "secret-token", password: "secret-password" }
+        nested: { accessToken: "secret-token", password: "secret-password", otp: "123456", note: "keep" }
       }
     })).toEqual({
       arguments: {
         authorization: "[Redacted]",
-        nested: { accessToken: "[Redacted]", password: "[Redacted]" }
+        nested: { accessToken: "[Redacted]", password: "[Redacted]", otp: "[Redacted]", note: "keep" }
       }
     });
   });

@@ -6,10 +6,13 @@ import { CopilotClient, defineTool, type CopilotSession, type PermissionRequest,
 import {
   CONTINUE_PERMISSION_SCOPE,
   shouldAutoApprove,
+  redactSecureFormToolPayload,
+  toSecureFormSnapshot,
   type ApprovalMode as ContractApprovalMode,
-  type ApprovalScope
+  type ApprovalScope,
+  type SecureFormSnapshot
 } from "@app/contracts";
-import { ApprovalMode, createPrismaGitHubTokenStore, db, exchangeOAuthRefreshToken, expiredForeignLeaseWhere, MessageRole, PermissionStatus, Prisma, resolveGitHubAccessToken, SessionStatus, TurnStatus } from "@app/db";
+import { ApprovalMode, createPrismaGitHubTokenStore, db, exchangeOAuthRefreshToken, expiredForeignLeaseWhere, MessageRole, PermissionStatus, Prisma, resolveGitHubAccessToken, SecureFormStatus, SessionStatus, TurnStatus } from "@app/db";
 import { createServiceLogger, rotateFileIfNeeded, rotationOptionsFromEnvironment } from "@app/logging";
 import {
   RepositoryRegistry,
@@ -28,9 +31,10 @@ import { sanitizeSdkEventForLog, sanitizeToolEventForLog } from "./tool-event-lo
 import { lastAssistantContent } from "./assistant-response.js";
 import { resolvePythonLauncher } from "./platform.js";
 import { postSandboxJson } from "./sandbox-client.js";
+import { postWorkerJson, runSecureFormTool, secureFormPauseBudgetMs } from "./secure-form.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { ToolRoundBudget } from "./tool-round-budget.js";
-import { classifyPermissionPoll, CONTINUE_EXPIRED_MESSAGE, CONTINUE_STOPPED_MESSAGE, continueCheckpointCopy, INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sdkTurnWaitMs, sessionStatusAfterInterrupt, TurnTimeoutError, waitForTurn, type TurnClock } from "./turn-control.js";
+import { type ActiveTurnClock, classifyPermissionPoll, CONTINUE_EXPIRED_MESSAGE, CONTINUE_STOPPED_MESSAGE, continueCheckpointCopy, createActiveTurnClock, INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sdkTurnCeilingMs, sdkTurnWaitMs, sessionStatusAfterInterrupt, TurnTimeoutError, waitForTurn, type TurnClock } from "./turn-control.js";
 import { z } from "zod";
 
 const booleanEnvironmentValue = z.enum(["true", "false"]).default("false").transform((value) => value === "true");
@@ -46,6 +50,7 @@ const workerEnvSchema = z.object({
   SANDBOX_RUNNER_TOKEN: serviceTokenSchema("SANDBOX_RUNNER_TOKEN"),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
   APPROVAL_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
+  SECURE_FORM_TIMEOUT_SECONDS: z.coerce.number().int().positive().max(3_600).default(600),
   LLM_TRACE_ENABLED: booleanEnvironmentValue,
   LLM_TRACE_CAPTURE_CONTENT: booleanEnvironmentValue,
   LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl"),
@@ -67,6 +72,7 @@ const env = parseEnv(workerEnvSchema);
 const workerId = env.WORKER_ID || randomUUID();
 const leaseRenewEveryMs = Math.max(1_000, Math.floor(env.TURN_LEASE_MS / 3));
 const sandboxTimeoutMs = sandboxRequestTimeoutMs(env.COMMAND_TIMEOUT_SECONDS, env.SANDBOX_REQUEST_TIMEOUT_BUFFER_SECONDS);
+const secureFormPauseMs = secureFormPauseBudgetMs(env.SECURE_FORM_TIMEOUT_SECONDS, env.APPROVAL_TIMEOUT_SECONDS);
 const githubTokenStore = createPrismaGitHubTokenStore(db);
 const ownedTurnIds = new Set<string>();
 const logger = createServiceLogger({ service: "worker" });
@@ -212,6 +218,42 @@ async function appendEvent(sessionId: string, turnId: string | null, kind: strin
   scheduleEventNotify(sessionId);
 }
 
+function persistedToolData(data: Record<string, unknown>): Record<string, unknown> {
+  const name = String(data.toolName ?? data.name ?? "");
+  if (name !== "request_secure_form") return data;
+  return redactSecureFormToolPayload(data) as Record<string, unknown>;
+}
+
+async function cancelSecureForms(sessionId: string, reason: string, turnId?: string): Promise<void> {
+  try {
+    await postWorkerJson({
+      baseUrl: apiBaseUrl(),
+      token: env.WORKER_CONTROL_TOKEN,
+      pathname: "/internal/secure-forms/cancel",
+      body: { sessionId, reason, ...(turnId ? { turnId } : {}) }
+    });
+  } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : "cancel failed", sessionId }, "Secure form cancel failed; updating the database directly");
+    const rows = await db.secureFormRequest.findMany({
+      where: { sessionId, status: SecureFormStatus.PENDING, ...(turnId ? { turnId } : {}) }
+    });
+    for (const row of rows) {
+      const changed = await db.secureFormRequest.updateMany({
+        where: { id: row.id, status: SecureFormStatus.PENDING },
+        data: { status: SecureFormStatus.CANCELLED, decidedAt: new Date() }
+      });
+      if (changed.count === 0) continue;
+      await appendEvent(row.sessionId, row.turnId, "secure-form.completed", JSON.parse(JSON.stringify(toSecureFormSnapshot({ ...row, status: SecureFormStatus.CANCELLED }))) as Record<string, unknown>);
+    }
+    await postWorkerJson({
+      baseUrl: apiBaseUrl(),
+      token: env.WORKER_CONTROL_TOKEN,
+      pathname: "/internal/secure-forms/discard",
+      body: { formIds: rows.map((row) => row.id) }
+    }).catch(() => undefined);
+  }
+}
+
 const tracedSdkEvents = new Set([
   "system.message",
   "user.message",
@@ -351,21 +393,27 @@ async function waitForManualPermission(
   return outcome;
 }
 
-async function waitForPermission(sessionId: string, turnId: string, scope: ApprovalScope, intention: string, display: string, payload: Record<string, unknown>): Promise<boolean> {
+async function waitForPermission(sessionId: string, turnId: string, scope: ApprovalScope, intention: string, display: string, payload: Record<string, unknown>, clock: ActiveTurnClock, options?: { requireDecision?: boolean }): Promise<boolean> {
   const current = await db.chatSession.findUniqueOrThrow({ where: { id: sessionId } });
   const mode: ContractApprovalMode = current.approvalMode === ApprovalMode.ALLOW_ALL ? "allow-all" : current.approvalMode === ApprovalMode.SESSION_SCOPED ? "session-scoped" : "interactive";
-  const autoApprove = shouldAutoApprove(mode, approvalScopesFromDb(current.approvalScopes), scope);
+  const autoApprove = !options?.requireDecision && shouldAutoApprove(mode, approvalScopesFromDb(current.approvalScopes), scope);
   if (autoApprove) {
     await db.auditLog.create({ data: { userId: current.userId, action: "permission.auto-approved", targetId: sessionId, metadata: { scope } } });
     return true;
   }
-  const outcome = await waitForManualPermission(sessionId, turnId, scope, intention, display, payload, true);
-  return outcome === "approved";
+  clock.hold();
+  try {
+    const outcome = await waitForManualPermission(sessionId, turnId, scope, intention, display, payload, true);
+    return outcome === "approved";
+  } finally {
+    clock.release();
+  }
 }
 
-function permissionHandler(sessionId: string, turnId: string) {
+function permissionHandler(sessionId: string, turnId: string, clock: ActiveTurnClock) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
     if (request.kind === "write") return { kind: "reject", feedback: "Repository writes are disabled by policy" };
+    if (request.kind === "custom-tool" && request.toolName === "request_secure_form") return { kind: "approve-once" };
     if (request.kind === "shell") {
       const approved = await waitForPermission(sessionId, turnId, "shell", request.intention, request.fullCommandText, {
         command: request.fullCommandText,
@@ -374,7 +422,7 @@ function permissionHandler(sessionId: string, turnId: string) {
         possibleUrls: request.possibleUrls,
         hasWriteFileRedirection: request.hasWriteFileRedirection,
         warning: request.warning
-      });
+      }, clock);
       return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this shell request" };
     }
     if (request.kind === "mcp") {
@@ -386,7 +434,7 @@ function permissionHandler(sessionId: string, turnId: string) {
         toolTitle: request.toolTitle,
         readOnly: request.readOnly,
         args: request.args ?? {}
-      });
+      }, clock);
       return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this MCP request" };
     }
     if (request.kind !== "custom-tool") return { kind: "reject", feedback: `Tool permission '${request.kind}' is not available` };
@@ -406,7 +454,7 @@ function permissionHandler(sessionId: string, turnId: string) {
               ? "Run the repository diagnostics task"
               : String(args.script ?? "");
     const intention = typeof args.intention === "string" ? args.intention : request.toolDescription;
-    const approved = await waitForPermission(sessionId, turnId, scope, intention, display, args);
+    const approved = await waitForPermission(sessionId, turnId, scope, intention, display, args, clock);
     return approved ? { kind: "approve-once" } : { kind: "reject", feedback: "The user denied or did not answer this request" };
   };
 }
@@ -422,7 +470,52 @@ const rawSchemas = {
   patch: { type: "object", properties: { patch: { type: "string" }, intention: { type: "string" } }, required: ["patch", "intention"], additionalProperties: false },
   url: { type: "object", properties: { url: { type: "string", format: "uri" }, intention: { type: "string" } }, required: ["url", "intention"], additionalProperties: false },
   executionTask: { type: "object", properties: { intention: { type: "string" } }, required: ["intention"], additionalProperties: false },
-  script: { type: "object", properties: { script: { type: "string" }, args: { type: "array", items: { type: "string" } }, interpreter: { type: "string", enum: ["direct", "shell", "node", "python"] }, intention: { type: "string" } }, required: ["script", "intention"], additionalProperties: false }
+  script: { type: "object", properties: { script: { type: "string" }, args: { type: "array", items: { type: "string" } }, interpreter: { type: "string", enum: ["direct", "shell", "node", "python"] }, intention: { type: "string" } }, required: ["script", "intention"], additionalProperties: false },
+  secureForm: {
+    type: "object",
+    additionalProperties: false,
+    required: ["title", "targetSite", "purpose", "steps"],
+    properties: {
+      title: { type: "string" },
+      subtitle: { type: "string" },
+      targetSite: { type: "string" },
+      purpose: { type: "string" },
+      deliveryCommand: { type: "string" },
+      deliveryMode: { type: "string", enum: ["final", "each-step"] },
+      steps: {
+        type: "array",
+        minItems: 1,
+        maxItems: 6,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "kind"],
+          properties: {
+            id: { type: "string" },
+            kind: { type: "string", enum: ["input", "confirm"] },
+            title: { type: "string" },
+            prompt: { type: "string" },
+            fields: {
+              type: "array",
+              maxItems: 8,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["name", "label", "type"],
+                properties: {
+                  name: { type: "string" },
+                  label: { type: "string" },
+                  type: { type: "string", enum: ["text", "email", "password", "otp"] },
+                  purpose: { type: "string" },
+                  required: { type: "boolean" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 } as const;
 
 async function detectRepositoryCommand(repository: RepositoryConfig, kind: "tests" | "problems"): Promise<string> {
@@ -469,7 +562,7 @@ async function detectRepositoryCommand(repository: RepositoryConfig, kind: "test
   throw new Error(`No supported repository ${kind === "tests" ? "test" : "diagnostics"} task was detected`);
 }
 
-function createTools(repository: RepositoryConfig, sessionId: string, beforeHandler?: () => Promise<void>): Tool<any>[] {
+function createTools(repository: RepositoryConfig, sessionId: string, turnId: string, clock: ActiveTurnClock, beforeHandler?: () => Promise<void>): Tool<any>[] {
   return [
     defineTool<{ path?: string; depth?: number }>("repo_tree", {
       description: "List files and directories in the configured live repository.", parameters: rawSchemas.tree, skipPermission: true, defer: "never",
@@ -553,6 +646,78 @@ function createTools(repository: RepositoryConfig, sessionId: string, beforeHand
           args: executableArgs
         });
       }
+    }),
+    defineTool("request_secure_form", {
+      description: "Ask the signed-in user to fill a secure form when a task needs a password, one-time code, or an approve-on-device confirmation. Arguments describe the site and fields only. Never put secret values in arguments, purpose, or title. The result reports status only and never contains field values. Use a confirm step with no fields when the user must approve a prompt on their phone. Optional deliveryCommand receives the values on stdin after a separate shell approval; final writes one JSON document, each-step writes one JSON line per step after the form is fully submitted.",
+      parameters: rawSchemas.secureForm,
+      skipPermission: true,
+      defer: "never",
+      handler: (args: unknown) => runSecureFormTool({
+        args,
+        sessionId,
+        pollMs: env.WORKER_POLL_INTERVAL_MS,
+        pause: () => clock.hold(),
+        resume: () => clock.release(),
+        create: async (body) => postWorkerJson<SecureFormSnapshot>({
+          baseUrl: apiBaseUrl(),
+          token: env.WORKER_CONTROL_TOKEN,
+          pathname: "/internal/secure-forms",
+          body: {
+            sessionId,
+            title: body.title,
+            targetSite: body.targetSite,
+            purpose: body.purpose,
+            steps: body.steps,
+            ...(body.subtitle ? { subtitle: body.subtitle } : {})
+          }
+        }),
+        readStatus: async (formId) => {
+          const row = await db.secureFormRequest.findFirst({ where: { id: formId, sessionId } });
+          if (!row) return "missing";
+          try {
+            return toSecureFormSnapshot(row).status;
+          } catch {
+            return "missing";
+          }
+        },
+        stopped: async () => {
+          const latest = await db.turn.findUnique({ where: { id: turnId }, select: { status: true } });
+          return !latest || latest.status === TurnStatus.STOPPED || latest.status === TurnStatus.INTERRUPTED || latest.status === TurnStatus.TIMED_OUT || latest.status === TurnStatus.FAILED;
+        },
+        cancel: async (formId) => {
+          await postWorkerJson({
+            baseUrl: apiBaseUrl(),
+            token: env.WORKER_CONTROL_TOKEN,
+            pathname: `/internal/secure-forms/${formId}/cancel`,
+            body: { sessionId, reason: "stopped" }
+          });
+        },
+        expire: async (formId) => {
+          await postWorkerJson({
+            baseUrl: apiBaseUrl(),
+            token: env.WORKER_CONTROL_TOKEN,
+            pathname: `/internal/secure-forms/${formId}/expire`,
+            body: { sessionId, reason: "timeout" }
+          });
+        },
+        approveDelivery: (command) => waitForPermission(
+          sessionId,
+          turnId,
+          "shell",
+          "Deliver secure form values to an approved command over stdin",
+          command,
+          { command, delivery: "stdin" },
+          clock,
+          { requireDecision: true }
+        ),
+        deliver: (formId, command, mode) => sandboxRequest("/secure-form/deliver", {
+          sessionId,
+          formId,
+          repositoryId: repository.id,
+          command,
+          mode
+        })
+      })
     })
   ].map((tool) => ({
     ...tool,
@@ -579,6 +744,7 @@ async function runTurn(job: TurnJobLike) {
   sessionLocks.add(job.data.sessionId);
   ownedTurnIds.add(job.data.turnId);
   let sdkSession: CopilotSession | undefined;
+  let pausePoll: ReturnType<typeof setInterval> | undefined;
   let turnLogger = logger.child({ sessionId: job.data.sessionId });
   const checkpointStop: { message: string | null } = { message: null };
   let turnClock: TurnClock | undefined;
@@ -600,9 +766,17 @@ async function runTurn(job: TurnJobLike) {
     await appendEvent(turn.session.id, turn.id, "turn.started", { branch: git.branch, headSha: git.headSha, dirty: git.dirty });
     const token = await accessTokenForAccount(turn.session.githubAccount.id, Math.max(5 * 60 * 1000, env.TURN_TIMEOUT_MS));
     const client = await getCopilotClient(turn.session.githubAccount.host);
+    const clock = createActiveTurnClock(env.TURN_TIMEOUT_MS);
+    pausePoll = setInterval(() => {
+      void db.secureFormRequest.count({ where: { turnId: turn.id, status: SecureFormStatus.PENDING } })
+        .then((count) => clock.setExternal(count > 0))
+        .catch(() => undefined);
+    }, env.WORKER_POLL_INTERVAL_MS);
+    pausePoll.unref?.();
     const checkpointsEnabled = env.MAX_TOOL_ROUNDS_BEFORE_CONFIRM > 0;
     const budget = new ToolRoundBudget(env.MAX_TOOL_ROUNDS_BEFORE_CONFIRM, async (completedRounds) => {
       turnClock?.pause();
+      clock.hold();
       try {
         const copy = continueCheckpointCopy(completedRounds);
         const outcome = await waitForManualPermission(turn.session.id, turn.id, CONTINUE_PERMISSION_SCOPE, copy.intention, copy.display, {
@@ -616,6 +790,7 @@ async function runTurn(job: TurnJobLike) {
         }
         return false;
       } finally {
+        clock.release();
         turnClock?.resume();
       }
     });
@@ -636,7 +811,7 @@ async function runTurn(job: TurnJobLike) {
       await stopForCheckpoint();
       return { permissionDecision: "deny" as const, permissionDecisionReason: checkpointStop.message ?? "The turn was stopped" };
     };
-    const tools = checkpointsEnabled ? createTools(repository, turn.session.id, beforeHandler) : createTools(repository, turn.session.id);
+    const tools = createTools(repository, turn.session.id, turn.id, clock, checkpointsEnabled ? beforeHandler : undefined);
     const skillDirectories = await prepareSkillView(turn.session.id, skills);
     const sessionOptions = {
       model: turn.session.model,
@@ -652,8 +827,8 @@ async function runTurn(job: TurnJobLike) {
       enableSkills: true,
       skipEmbeddingRetrieval: true,
       infiniteSessions: { enabled: true },
-      systemMessage: { mode: "append" as const, content: "You are working with a live repository. Use view, rg, glob, and repo_tree for inspection; use apply_patch for focused edits; use problems and runTests for standard validation. Approved bash commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Clearly report changes and validation results." },
-      onPermissionRequest: permissionHandler(turn.session.id, turn.id),
+      systemMessage: { mode: "append" as const, content: "You are working with a live repository. Use view, rg, glob, and repo_tree for inspection; use apply_patch for focused edits; use problems and runTests for standard validation. Approved bash commands and private scripts run directly on the host without isolation and may modify the repository or access other host resources. Clearly report changes and validation results. When a task needs a password, one-time code, or approve-on-device confirmation, call request_secure_form. Do not ask the user to paste secrets into the chat, and do not put secrets in tool arguments. The tool result never contains secret values. Inside an approved shell, node \"$COPILOT_SECURE_FORM_BIN\" opens the same form and can pass values to another command on stdin." },
+      onPermissionRequest: permissionHandler(turn.session.id, turn.id, clock),
       ...(checkpointsEnabled ? {
         hooks: {
           onPreToolUse: () => guardTool(),
@@ -717,14 +892,16 @@ async function runTurn(job: TurnJobLike) {
         }
         else if (event.type === "assistant.message_delta") await appendEvent(turn.session.id, turn.id, "assistant.delta", { deltaContent: String(event.data.deltaContent ?? "") });
         else if (event.type === "tool.execution_start") {
-          turnLogger.info({ event: "tool.started", tool: sanitizeToolEventForLog(event.data) }, "Tool execution started");
-          await appendEvent(turn.session.id, turn.id, "tool.started", event.data);
+          const data = persistedToolData(event.data);
+          turnLogger.info({ event: "tool.started", tool: sanitizeToolEventForLog(data) }, "Tool execution started");
+          await appendEvent(turn.session.id, turn.id, "tool.started", data);
         }
         else if (event.type === "tool.execution_complete") {
-          turnLogger.info({ event: "tool.completed", tool: sanitizeToolEventForLog(event.data) }, "Tool execution completed");
-          const content = JSON.stringify(event.data, null, 2);
+          const data = persistedToolData(event.data);
+          turnLogger.info({ event: "tool.completed", tool: sanitizeToolEventForLog(data) }, "Tool execution completed");
+          const content = JSON.stringify(data, null, 2);
           const message = await db.message.create({ data: { sessionId: turn.session.id, turnId: turn.id, role: MessageRole.TOOL, content, metadata: { eventType: event.type } } });
-          await appendEvent(turn.session.id, turn.id, "tool.completed", { ...event.data, messageId: message.id, content });
+          await appendEvent(turn.session.id, turn.id, "tool.completed", { ...data, messageId: message.id, content });
         }
         else if (event.type === "session.error") await appendEvent(turn.session.id, turn.id, "turn.failed", event.data);
       })().catch((error) => turnLogger.error(error, "Failed to persist SDK event"));
@@ -733,8 +910,12 @@ async function runTurn(job: TurnJobLike) {
     if (!prompt) throw new Error("Turn has no user message");
     await waitForTurn({
       timeoutMs: env.TURN_TIMEOUT_MS,
-      sdkTimeoutMs: sdkTurnWaitMs(env.TURN_TIMEOUT_MS, env.APPROVAL_TIMEOUT_SECONDS * 1000, checkpointsEnabled),
-      onClock: (clock) => { turnClock = clock; },
+      sdkTimeoutMs: Math.max(
+        sdkTurnWaitMs(env.TURN_TIMEOUT_MS, env.APPROVAL_TIMEOUT_SECONDS * 1000, checkpointsEnabled),
+        sdkTurnCeilingMs(env.TURN_TIMEOUT_MS, secureFormPauseMs)
+      ),
+      clock,
+      onClock: (next) => { turnClock = next; },
       send: (timeoutMs) => sdkSession!.sendAndWait({ prompt }, timeoutMs),
       abort: async () => {
         await sdkSession?.abort().catch(() => undefined);
@@ -796,6 +977,7 @@ async function runTurn(job: TurnJobLike) {
     else turnLogger.error(error, "Turn processing failed");
     if (!stopped) throw error;
   } finally {
+    if (pausePoll) clearInterval(pausePoll);
     ownedTurnIds.delete(job.data.turnId);
     activeSessions.delete(job.data.sessionId);
     stopRequested.delete(job.data.sessionId);
@@ -828,6 +1010,7 @@ async function handleControl(name: string, data: Record<string, unknown>) {
   }
   const sessionId = String(data.sessionId);
   stopRequested.add(sessionId);
+  await cancelSecureForms(sessionId, name === "delete-session" ? "delete" : "stop").catch(() => undefined);
   const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
   if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
   const active = activeSessions.get(sessionId);
@@ -917,6 +1100,7 @@ async function recoverExpiredLeases() {
       data: { status: sessionStatusAfterInterrupt(active.map((turn) => turn.status)) }
     });
     await appendEvent(candidate.sessionId, candidate.id, "turn.interrupted", { error: INTERRUPTED_TURN_MESSAGE, reason: "lease-expired" });
+    await cancelSecureForms(candidate.sessionId, "lease-expired", candidate.id).catch(() => undefined);
     logger.warn({ sessionId: candidate.sessionId, turnId: candidate.id }, "Turn interrupted after lease expiry");
   }
 }
@@ -1068,6 +1252,7 @@ async function shutdown() {
   if (notifyTimer) clearTimeout(notifyTimer);
   for (const [sessionId, active] of activeSessions) {
     stopRequested.add(sessionId);
+    await cancelSecureForms(sessionId, "shutdown").catch(() => undefined);
     const pending = await db.permissionRequest.findMany({ where: { sessionId, status: PermissionStatus.PENDING } });
     if (pending.length) await db.permissionRequest.updateMany({ where: { sessionId, status: PermissionStatus.PENDING }, data: { status: PermissionStatus.DENIED, decidedAt: new Date() } });
     await active.session.abort().catch(() => undefined);

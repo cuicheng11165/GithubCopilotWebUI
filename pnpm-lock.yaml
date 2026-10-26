@@ -57,6 +57,9 @@ importers:
 
   apps/sandbox-runner:
     dependencies:
+      '@app/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@app/repository-tools':
         specifier: workspace:*
         version: link:../../packages/repository-tools

@@ -22,7 +22,9 @@ SQLite runs in WAL mode with foreign keys enabled, one connection per process, a
 
 A running turn stores `leaseOwner` and `leaseExpiresAt`. The worker renews that lease while the turn is running or waiting for approval, including while a continue checkpoint is open. `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` defaults to 50. Time spent on that checkpoint does not count toward `TURN_TIMEOUT_MS`. Startup and periodic recovery mark only expired or unowned leases as `INTERRUPTED`. Those turns are not queued again, so a restart cannot repeat shell commands, continue prompts, or other side effects. Send a new message to retry. Do not place the database on NFS or another network filesystem.
 
-Assistant delta events are deleted once the turn's final assistant message is stored. Tool events, approvals, and turn results stay in `SessionEvent` for replay.
+Assistant delta events are deleted once the turn's final assistant message is stored. Tool events, approvals, secure-form metadata, and turn results stay in `SessionEvent` for replay.
+
+`SecureFormRequest` stores the title, target site, purpose, field schema, step index, and status. It has no column for passwords, one-time codes, or other submitted values. Those values live only in the API process memory until they are claimed once, discarded, or the process restarts. An API restart expires pending forms because that memory is empty.
 
 The default Worker concurrency is 20. SQLite serializes writers, so increase concurrency only after measuring the actual workload. Additional worker processes will not take over a live lease.
 

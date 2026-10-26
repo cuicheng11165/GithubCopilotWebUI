@@ -1,10 +1,12 @@
 import Fastify from "fastify";
 import { z } from "zod";
+import { collectSecretValues } from "@app/contracts";
 import { RepositoryRegistry } from "@app/repository-tools";
 import { bearerAuthorizationMatches, parseEnv, serviceTokenSchema } from "@app/security";
 import { ExecutionManager } from "./execution.js";
 import { requestPublicUrl } from "./network.js";
 import { applyRepositoryPatch } from "./patch.js";
+import { createSecureFormApi, createSecureFormBridge } from "./secure-form.js";
 
 const env = parseEnv(z.object({
   SANDBOX_RUNNER_HOST: z.string().default("127.0.0.1"),
@@ -13,7 +15,8 @@ const env = parseEnv(z.object({
   REPOSITORIES_CONFIG: z.string().min(1).default("./config/repositories.yaml"),
   COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   COMMAND_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().default(1_048_576),
-  LOCAL_SANDBOX_TMP_ROOT: z.string().default("./data/local-sandbox")
+  LOCAL_SANDBOX_TMP_ROOT: z.string().default("./data/local-sandbox"),
+  API_INTERNAL_URL: z.string().url().default("http://127.0.0.1:4000")
 }));
 
 const app = Fastify({ logger: true, bodyLimit: 256 * 1024 });
@@ -21,6 +24,12 @@ const registry = new RepositoryRegistry(env.REPOSITORIES_CONFIG);
 await registry.load();
 registry.watch((error) => app.log.error(error, "Repository registry reload failed"));
 const executions = new ExecutionManager();
+const secureFormApi = createSecureFormApi({ baseUrl: env.API_INTERNAL_URL, token: env.SANDBOX_RUNNER_TOKEN });
+executions.setBridge(createSecureFormBridge({
+  api: secureFormApi,
+  beginStdin: (input) => executions.beginStdin(input),
+  runWithStdin: (input) => executions.runWithStdin(input)
+}));
 
 app.log.warn("Commands and private scripts run directly as the GithubCopilotWebUI host user without isolation");
 
@@ -115,6 +124,47 @@ app.post("/apply-patch", async (request, reply) => {
     return await applyRepositoryPatch(repository.canonicalPath, parsed.data.patch);
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : "Patch could not be applied" });
+  }
+});
+
+const deliverSchema = z.object({
+  sessionId: z.string().uuid(),
+  formId: z.string().uuid(),
+  repositoryId: z.string(),
+  command: z.string().min(1).max(100_000),
+  mode: z.enum(["final", "each-step"]).optional()
+});
+
+app.post("/secure-form/deliver", async (request, reply) => {
+  const parsed = deliverSchema.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).header("Cache-Control", "no-store").send({ delivered: false, error: "Invalid secure form delivery" });
+  let repository;
+  try { repository = registry.get(parsed.data.repositoryId); } catch { return reply.code(404).header("Cache-Control", "no-store").send({ delivered: false, error: "Repository not found" }); }
+  try {
+    const delivery = await secureFormApi.claim(parsed.data.sessionId, parsed.data.formId);
+    const secrets = collectSecretValues(delivery);
+    const stdin = parsed.data.mode === "each-step"
+      ? `${delivery.steps.map((step) => JSON.stringify(step.kind === "confirm" ? { id: step.id, kind: step.kind, confirmed: true } : { id: step.id, kind: step.kind, values: step.values ?? {} })).join("\n")}\n`
+      : `${JSON.stringify(delivery)}\n`;
+    const result = await executions.runWithStdin({
+      sessionId: parsed.data.sessionId,
+      command: parsed.data.command,
+      timeoutSeconds: env.COMMAND_TIMEOUT_SECONDS,
+      maxOutputBytes: env.COMMAND_MAX_OUTPUT_BYTES,
+      repositoryPath: repository.canonicalPath,
+      tempRoot: env.LOCAL_SANDBOX_TMP_ROOT,
+      stdin,
+      secrets
+    });
+    return reply.header("Cache-Control", "no-store").send({
+      delivered: result.exitCode === 0 && !result.timedOut,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut
+    });
+  } catch {
+    return reply.code(409).header("Cache-Control", "no-store").send({ delivered: false, error: "Secure form values could not be delivered" });
   }
 });
 

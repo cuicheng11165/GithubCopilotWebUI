@@ -141,6 +141,9 @@ export const eventKindSchema = z.enum([
   "tool.completed",
   "permission.requested",
   "permission.completed",
+  "secure-form.requested",
+  "secure-form.updated",
+  "secure-form.completed",
   "repository.changed",
   "usage.updated",
   "llm.trace",
@@ -204,3 +207,49 @@ export interface AuditSessionDetail {
   session: AuditSessionSummary;
   messages: ChatMessage[];
 }
+
+export {
+  advanceSecureForm,
+  assertModelSafeSecureFormResult,
+  collectSecretValues,
+  mergeSecureFormSnapshot,
+  parseSecureFormDefinition,
+  parseSecureFormToolInput,
+  parseStoredSecureFormSteps,
+  publicSecureFormHookResponse,
+  redactSecretText,
+  redactSecureFormToolPayload,
+  sanitizeDeliveryReport,
+  secureFormClaimBodySchema,
+  secureFormClaimStepBodySchema,
+  secureFormCreateBodySchema,
+  secureFormDefinitionSchema,
+  secureFormDeliveryModeSchema,
+  secureFormDiscardBodySchema,
+  secureFormFieldTypeSchema,
+  secureFormLifecycleBodySchema,
+  secureFormModelResult,
+  secureFormStatusName,
+  secureFormStatusSchema,
+  secureFormStepKindSchema,
+  secureFormSubmitSchema,
+  secureFormToolInputSchema,
+  toSecureFormSnapshot,
+  parseSecureFormSnapshot,
+  visibleSecureFormCards
+} from "./secure-form.js";
+export type {
+  SecureFormAdvance,
+  SecureFormCardModel,
+  SecureFormDefinition,
+  SecureFormDelivery,
+  SecureFormDeliveryMode,
+  SecureFormField,
+  SecureFormFieldType,
+  SecureFormSnapshot,
+  SecureFormStatusName,
+  SecureFormStep,
+  SecureFormStepDelivery,
+  SecureFormStepKind,
+  SecureFormToolInput
+} from "./secure-form.js";

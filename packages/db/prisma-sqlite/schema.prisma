@@ -91,6 +91,7 @@ model ChatSession {
   messages           Message[]
   events             SessionEvent[]
   permissionRequests PermissionRequest[]
+  secureFormRequests SecureFormRequest[]
 
   @@index([userId, updatedAt(sort: Desc)])
 }
@@ -110,6 +111,7 @@ model Turn {
   messages       Message[]
   events         SessionEvent[]
   permissions    PermissionRequest[]
+  secureForms    SecureFormRequest[]
 
   @@unique([sessionId, idempotencyKey])
   @@index([sessionId, createdAt])
@@ -161,6 +163,27 @@ model PermissionRequest {
 
   @@unique([sessionId, sdkRequestId])
   @@index([sessionId, status])
+}
+
+model SecureFormRequest {
+  id          String      @id @default(uuid())
+  sessionId   String
+  turnId      String
+  title       String
+  subtitle    String      @default("Secure form")
+  targetSite  String
+  purpose     String
+  steps       Json
+  currentStep Int         @default(0)
+  status      String      @default("PENDING")
+  expiresAt   DateTime
+  decidedAt   DateTime?
+  createdAt   DateTime    @default(now())
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turn        Turn        @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, status])
+  @@index([turnId, status])
 }
 
 model AuditLog {

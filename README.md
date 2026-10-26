@@ -79,6 +79,7 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 | 验证 | `problems`、`runTests`、`testFailure` | 自动识别标准诊断与测试任务，并读取失败输出。 |
 | 网络 | `web_fetch` | 通过受控网络边界抓取公开 HTTP/HTTPS URL。 |
 | 私有技能 | `run_private_script` | 执行仓库或私有 Skill 中的脚本。 |
+| 安全表单 | `request_secure_form` | 向用户收集密码、验证码或设备确认。字段值只进入内存，不进入模型上下文。 |
 
 仓库读取、命令状态读取和停止工具不需要额外审批。以下三类能力需要审批：
 
@@ -95,6 +96,8 @@ GithubCopilotWebUI 适合在一台受信任机器上，为多个已授权用户�
 - **allow-all**：自动批准所有受支持范围的执行请求。
 
 > 注意：这些审批模式只控制执行是否可以开始，并不构成操作系统级沙箱。被批准的命令或脚本会以运行本服务的系统用户身份执行。
+
+安全表单不受 allow-all 自动跳过。需要口令、一次性验证码，或“在手机上批准”时，Agent 调用 `request_secure_form`，或已批准的命令执行 `node "$COPILOT_SECURE_FORM_BIN"`。界面按步骤显示卡片；密码和验证码用掩码输入。提交后的值只通过已认证的内部通道写到目标进程的 stdin，模型和会话事件只看到成功或失败。详见 `docs/secure-form.md`。
 
 ### 停止、恢复与删除
 
@@ -372,6 +375,7 @@ The project exposes this default core tool set to the Agent:
 | Validation | `problems`, `runTests`, `testFailure` | Detect standard diagnostics and test tasks and inspect failure output. |
 | Network | `web_fetch` | Fetch a public HTTP/HTTPS URL through the controlled network boundary. |
 | Private skills | `run_private_script` | Run a repository or private-skill script. |
+| Secure form | `request_secure_form` | Collect a password, one-time code, or device approval. Values stay in memory and out of the model context. |
 
 Repository reads and command status/stop operations do not require approval. The following capability groups remain approval-gated:
 
@@ -388,6 +392,8 @@ Sessions support three approval modes:
 - **allow-all**: all supported execution scopes are auto-approved.
 
 > Note: these approval modes only control whether execution may start. They are not an operating-system sandbox. Approved commands or scripts run as the same system user that started the service.
+
+Secure forms are not skipped by allow-all. When a task needs a password, one-time code, or an approve-on-device confirmation, the agent calls `request_secure_form`, or an approved command runs `node "$COPILOT_SECURE_FORM_BIN"`. The chat shows one card per step. Password and one-time-code fields are masked. Submitted values are written to the target process stdin over the authenticated internal channel. The model and session events learn only success or failure. See `docs/secure-form.md`.
 
 ### Stop, Resume, And Delete
 

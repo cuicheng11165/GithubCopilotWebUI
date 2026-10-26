@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ExecutionManager, localShellCommand, restrictedExecutionEnvironment } from "./execution.js";
+import { createCommandDeadline, ExecutionManager, localShellCommand, restrictedExecutionEnvironment, type SecureFormBridge } from "./execution.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -171,5 +171,65 @@ describe("ExecutionManager", () => {
     }
     expect(manager.read(sessionId, started.bashId).stdout).toContain("ready");
     expect((await manager.stopOne(sessionId, started.bashId)).status).toBe("stopped");
+  });
+
+  it("does not count paused time toward the command deadline", () => {
+    let now = 0;
+    const deadline = createCommandDeadline(100, () => now);
+    deadline.pause();
+    now = 500;
+    expect(deadline.remainingMs()).toBe(100);
+    deadline.resume();
+    now = 540;
+    expect(deadline.remainingMs()).toBe(60);
+    deadline.pause();
+    deadline.pause();
+    expect(deadline.paused).toBe(true);
+    deadline.resume();
+    expect(deadline.paused).toBe(false);
+  });
+
+  it("lets a short command finish while its deadline is paused", async () => {
+    const repositoryPath = await temporaryDirectory("copilotdeck-repository-");
+    const tempRoot = await temporaryDirectory("copilotdeck-execution-");
+    const bridge: SecureFormBridge = {
+      async attach({ controls }) {
+        controls.pauseTimeout();
+        return { env: {}, async close() { return undefined; } };
+      }
+    };
+    const manager = new ExecutionManager(bridge);
+    const result = await manager.execute({
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      command: "Finish during a paused deadline",
+      executable: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 200)"],
+      repositoryPath,
+      tempRoot,
+      timeoutSeconds: 0.1,
+      maxOutputBytes: 1024
+    });
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("redacts stdin secrets from command output", async () => {
+    const repositoryPath = await temporaryDirectory("copilotdeck-repository-");
+    const tempRoot = await temporaryDirectory("copilotdeck-execution-");
+    const manager = new ExecutionManager();
+    const result = await manager.runWithStdin({
+      sessionId: "99999999-9999-4999-8999-999999999999",
+      command: "Echo stdin",
+      executable: process.execPath,
+      args: ["-e", "let value=''; process.stdin.on('data', (chunk) => { value += chunk; }); process.stdin.on('end', () => process.stdout.write(value));"],
+      repositoryPath,
+      tempRoot,
+      timeoutSeconds: 2,
+      maxOutputBytes: 1024,
+      stdin: "{\"password\":\"hunter2\"}\n",
+      secrets: ["hunter2"]
+    });
+    expect(result.stdout).toContain("[redacted]");
+    expect(result.stdout).not.toContain("hunter2");
   });
 });

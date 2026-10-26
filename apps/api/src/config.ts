@@ -1,5 +1,14 @@
-import { parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
+import { assertServiceSecret, parseEnv, serviceTokenSchema, tokenEncryptionKeySchema } from "@app/security";
 import { z } from "zod";
+
+const optionalServiceToken = (name: string) => z.string().optional().or(z.literal("")).superRefine((value, ctx) => {
+  if (!value) return;
+  try {
+    assertServiceSecret(name, value);
+  } catch (error) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: error instanceof Error ? error.message : `${name} is invalid.` });
+  }
+}).transform((value) => value || undefined);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -9,6 +18,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   WORKER_CONTROL_URL: z.string().url().default("http://127.0.0.1:4200"),
   WORKER_CONTROL_TOKEN: serviceTokenSchema("WORKER_CONTROL_TOKEN"),
+  SANDBOX_RUNNER_TOKEN: optionalServiceToken("SANDBOX_RUNNER_TOKEN"),
+  SECURE_FORM_TIMEOUT_SECONDS: z.coerce.number().int().positive().max(3_600).default(600),
   EVENT_POLL_INTERVAL_MS: z.coerce.number().int().min(50).max(5_000).default(200),
   COOKIE_SECRET: serviceTokenSchema("COOKIE_SECRET"),
   TOKEN_ENCRYPTION_KEY: tokenEncryptionKeySchema(),
