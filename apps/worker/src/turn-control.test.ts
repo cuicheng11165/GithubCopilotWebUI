@@ -64,9 +64,9 @@ describe("continue checkpoint timing", () => {
   });
 
   it("describes continue and stop outcomes", () => {
-    expect(continueCheckpointCopy(25)).toEqual({
+    expect(continueCheckpointCopy(50)).toEqual({
       intention: "Continue this turn?",
-      display: "The agent has completed 25 tool rounds. Choose Continue to keep going, or Stop to end this turn."
+      display: "The agent has completed 50 tool rounds. Choose Continue to keep going, or Stop to end this turn."
     });
     expect(CONTINUE_STOPPED_MESSAGE).toContain("stopped this turn");
     expect(CONTINUE_EXPIRED_MESSAGE).toContain("not answered");

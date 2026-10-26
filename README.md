@@ -180,7 +180,7 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 - 为 Agent 注册项目定义的工具，包括仓库只读工具和受审批执行工具。
 - 将 Assistant 增量、完整回复、工具开始/完成、审批请求、Turn 完成/失败等写入事件表。
 - 处理停止请求、会话删除请求，并在租约过期后把 Turn 标为中断而不是自动重跑。
-- 在一个 Turn 完成 `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` 轮工具调用后暂停，并通过现有审批卡片询问是否继续。继续会重置计数；停止或审批超时则把 Turn 标为已停止。等待确认的时间不计入 Turn 超时，租约在等待期间保持续期。
+- 在一个 Turn 完成 `MAX_TOOL_ROUNDS_BEFORE_CONFIRM`（默认 50）轮工具调用后暂停，并通过现有审批卡片询问是否继续。继续会重置计数；停止或审批超时则把 Turn 标为已停止。等待确认的时间不计入 Turn 超时，租约在等待期间保持续期。
 
 ### `apps/sandbox-runner`：本机执行代理
 
@@ -473,7 +473,7 @@ Main responsibilities:
 - Register project-defined tools for the Agent, including read-only repository tools and approval-gated execution tools.
 - Write Assistant deltas, complete replies, tool start/completion events, approval requests, Turn completion/failure, and related events.
 - Handle stop requests, session deletion, and expired-lease recovery without replaying interrupted turns.
-- Pause a turn after `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` tool rounds and ask whether to continue through the existing approval card. Continue resets the counter. Stop, or no answer before the approval timeout, marks the turn stopped. Time spent waiting does not count toward the turn timeout, and the lease stays renewed while the prompt is open.
+- Pause a turn after `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` tool rounds (default 50) and ask whether to continue through the existing approval card. Continue resets the counter. Stop, or no answer before the approval timeout, marks the turn stopped. Time spent waiting does not count toward the turn timeout, and the lease stays renewed while the prompt is open.
 
 ### `apps/sandbox-runner`: Local Execution Proxy
 

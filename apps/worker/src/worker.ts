@@ -51,7 +51,7 @@ const workerEnvSchema = z.object({
   LLM_TRACE_FILE: z.string().default("./data/logs/otel/copilot.jsonl"),
   TURN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(24 * 60 * 60 * 1000).default(15 * 60 * 1000),
   TURN_LEASE_MS: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
-  MAX_TOOL_ROUNDS_BEFORE_CONFIRM: z.coerce.number().int().min(0).max(10_000).default(25),
+  MAX_TOOL_ROUNDS_BEFORE_CONFIRM: z.coerce.number().int().min(0).max(10_000).default(50),
   COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   SANDBOX_REQUEST_TIMEOUT_BUFFER_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   API_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
