@@ -122,6 +122,36 @@ describe("GitHub token refresh", () => {
     }))).rejects.toThrow(/GitHub token refresh failed/);
   });
 
+  it("claims through the shared token store before calling GitHub", async () => {
+    let claims = 0;
+    const requestRefresh = vi.fn(async () => ({ access_token: "claimed-access", refresh_token: "next-refresh", expires_in: 3600 }));
+    const updateAccount = vi.fn();
+    const current = account();
+    const resolved = await resolveGithubToken(current, deps({
+      requestRefresh,
+      updateAccount,
+      tokenStore: {
+        find: async () => ({
+          ...current,
+          host: "github.com",
+          refreshClaimedBy: null,
+          refreshClaimedUntil: null
+        }),
+        claim: async () => {
+          claims += 1;
+          return true;
+        },
+        save: async () => true,
+        saveIfRefreshTokenMatches: async () => true,
+        release: async () => {}
+      }
+    }));
+    expect(claims).toBe(1);
+    expect(requestRefresh).toHaveBeenCalledTimes(1);
+    expect(updateAccount).not.toHaveBeenCalled();
+    expect(resolved.githubToken).toBe("claimed-access");
+  });
+
   it("reads a usable account and ignores an expired or undecryptable one", async () => {
     const fresh = account({ encryptedAccessToken: "plain-access", accessTokenExpiresAt: new Date(NOW + 3_600_000) });
     await expect(readUsableGithubAccount("account-1", async () => fresh, (value) => value, NOW)).resolves.toMatchObject({ githubToken: "plain-access" });

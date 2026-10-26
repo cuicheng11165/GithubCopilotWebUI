@@ -13,7 +13,7 @@ export function shouldAutoApprove(mode: ApprovalMode, scopes: readonly ApprovalS
 export const sessionStatusSchema = z.enum(["idle", "queued", "running", "waiting-approval", "error"]);
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 
-export const turnStatusSchema = z.enum(["queued", "running", "waiting-approval", "completed", "stopped", "failed"]);
+export const turnStatusSchema = z.enum(["queued", "running", "waiting-approval", "completed", "stopped", "failed", "timed-out", "interrupted"]);
 export type TurnStatus = z.infer<typeof turnStatusSchema>;
 
 export const repositorySummarySchema = z.object({
@@ -120,6 +120,14 @@ export const permissionRequestSchema = z.object({
 });
 export type PermissionRequest = z.infer<typeof permissionRequestSchema>;
 
+export const turnSummarySchema = z.object({
+  id: z.string().uuid(),
+  status: turnStatusSchema,
+  error: z.string().nullable(),
+  createdAt: z.string().datetime()
+});
+export type TurnSummary = z.infer<typeof turnSummarySchema>;
+
 export const eventKindSchema = z.enum([
   "turn.queued",
   "turn.started",
@@ -135,7 +143,9 @@ export const eventKindSchema = z.enum([
   "session.updated",
   "turn.completed",
   "turn.stopped",
-  "turn.failed"
+  "turn.failed",
+  "turn.timed_out",
+  "turn.interrupted"
 ]);
 export type EventKind = z.infer<typeof eventKindSchema>;
 

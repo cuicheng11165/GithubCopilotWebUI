@@ -179,7 +179,7 @@ GitHub Copilot SDK / 本机仓库 / 本机执行环境
 - 解密当前用户的 GitHub token，并以该身份启动 Copilot 会话。
 - 为 Agent 注册项目定义的工具，包括仓库只读工具和受审批执行工具。
 - 将 Assistant 增量、完整回复、工具开始/完成、审批请求、Turn 完成/失败等写入事件表。
-- 处理停止请求、会话删除请求和 Worker 重启后的任务恢复。
+- 处理停止请求、会话删除请求，并在租约过期后把 Turn 标为中断而不是自动重跑。
 
 ### `apps/sandbox-runner`：本机执行代理
 
@@ -469,7 +469,7 @@ Main responsibilities:
 - Decrypt the current user's GitHub token and start the Copilot session as that user.
 - Register project-defined tools for the Agent, including read-only repository tools and approval-gated execution tools.
 - Write Assistant deltas, complete replies, tool start/completion events, approval requests, Turn completion/failure, and related events.
-- Handle stop requests, session deletion requests, and task recovery after Worker restart.
+- Handle stop requests, session deletion, and expired-lease recovery without replaying interrupted turns.
 
 ### `apps/sandbox-runner`: Local Execution Proxy
 

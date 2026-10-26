@@ -1,8 +1,9 @@
-import type { AuditSessionDetail, AuditSessionSummary, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
+import type { AuditSessionDetail, AuditSessionSummary, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary, TurnSummary } from "@app/contracts";
 
 export interface SessionDetail {
   session: ChatSession;
   messages: ChatMessage[];
+  turns: TurnSummary[];
   permissions: PermissionRequest[];
   skills: Array<{ name: string; description: string | null; source: string; warning: string | null; contentHash?: string }>;
 }

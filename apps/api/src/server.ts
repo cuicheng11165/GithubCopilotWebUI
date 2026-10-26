@@ -13,11 +13,14 @@ import {
 import { ApprovalMode as DbApprovalMode, MessageRole, PermissionStatus, Prisma, SessionStatus, TurnStatus, db, toDatabaseCursor, type ChatSession as DbChatSession } from "@app/db";
 import { createServiceLogger } from "@app/logging";
 import { RepositoryRegistry, getGitInfo, scanAgents, scanSkills } from "@app/repository-tools";
+import { bearerAuthorizationMatches } from "@app/security";
 import { auditSessionsAccess } from "./audit-access.js";
 import { authenticate, bindSessionLog, ownedSession, SESSION_COOKIE } from "./auth.js";
 import { config } from "./config.js";
 import { MemoryEphemeralStore, type EphemeralStore } from "./ephemeral-store.js";
 import { registerOAuthRoutes } from "./oauth.js";
+import { createSessionEventHub, type HubEvent } from "./session-event-hub.js";
+import { turnStatusName } from "./turn-status.js";
 
 const app = Fastify({ loggerInstance: createServiceLogger({ service: "api" }) as FastifyBaseLogger });
 app.log.info({ timestampFormat: "ISO 8601 UTC" }, "API session-routed text logging ready");
@@ -106,8 +109,34 @@ async function checkWorker(): Promise<void> {
   }
 }
 
+function serializeStreamEvent(event: { cursor: number; sessionId: string; turnId: string | null; kind: string; data: Prisma.JsonValue; createdAt: Date }): HubEvent {
+  return {
+    cursor: event.cursor,
+    sessionId: event.sessionId,
+    turnId: event.turnId,
+    kind: event.kind,
+    data: event.data,
+    createdAt: event.createdAt.toISOString()
+  };
+}
+
+const sessionEvents = createSessionEventHub({
+  pollIntervalMs: config.EVENT_POLL_INTERVAL_MS,
+  onError: (error) => app.log.error(error, "Session event poll failed"),
+  loadEvents: async (subscriptions) => {
+    if (subscriptions.length === 0) return [];
+    const events = await db.sessionEvent.findMany({
+      where: { OR: subscriptions.map((subscription) => ({ sessionId: subscription.sessionId, cursor: { gt: subscription.after } })) },
+      orderBy: { cursor: "asc" },
+      take: 2_000
+    });
+    return events.map(serializeStreamEvent);
+  }
+});
+
 async function appendEvent(sessionId: string, turnId: string | null, kind: string, data: Record<string, unknown>) {
-  await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
+  const event = await db.sessionEvent.create({ data: { sessionId, turnId, kind, data: data as Prisma.InputJsonValue } });
+  sessionEvents.publish([serializeStreamEvent(event)]);
 }
 
 async function rejectPendingPermissions(sessionId: string, userId: string, reason: string) {
@@ -128,6 +157,11 @@ async function requestWorkerStop(session: { id: string; sdkSessionId: string }, 
 }
 
 app.get("/health/live", async () => ({ status: "ok" }));
+app.post("/internal/events/notify", async (request, reply) => {
+  if (!bearerAuthorizationMatches(request.headers.authorization, config.WORKER_CONTROL_TOKEN)) return reply.code(401).send({ error: "Unauthorized" });
+  sessionEvents.notify();
+  return { ok: true };
+});
 app.get("/health/ready", async (_request, reply) => {
   try {
     await db.$queryRaw`SELECT 1`;
@@ -324,13 +358,15 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) 
   if (!(auth && "user" in auth)) return;
   const session = await db.chatSession.findFirst({ where: { id: request.params.id, userId: auth.user.id }, include: {
     messages: { orderBy: { createdAt: "asc" } },
+    turns: { orderBy: { createdAt: "asc" }, select: { id: true, status: true, error: true, createdAt: true } },
     permissionRequests: { where: { status: PermissionStatus.PENDING }, orderBy: { createdAt: "asc" } }
   } });
   if (!session) return reply.code(404).send({ error: "Session not found" });
   bindSessionLog(request, auth.user.id, session.id);
-  const { messages, permissionRequests, ...sessionData } = session;
+  const { messages, permissionRequests, turns, ...sessionData } = session;
   return {
     session: serializeSession(sessionData),
+    turns: turns.map((turn) => ({ id: turn.id, status: turnStatusName(turn.status), error: turn.error, createdAt: turn.createdAt.toISOString() })),
     messages: messages.map((message) => ({ ...message, role: message.role.toLowerCase(), createdAt: message.createdAt.toISOString() })),
     permissions: permissionRequests.map((permission) => ({
       id: permission.id,
@@ -449,7 +485,7 @@ app.post<{ Params: { id: string } }>("/api/sessions/:id/messages", async (reques
   const idempotencyKey = request.headers["idempotency-key"];
   if (typeof idempotencyKey !== "string" || idempotencyKey.length > 200) return reply.code(400).send({ error: "Idempotency-Key header is required" });
   const existing = await db.turn.findUnique({ where: { sessionId_idempotencyKey: { sessionId: session.id, idempotencyKey } } });
-  if (existing) return reply.code(202).send({ turnId: existing.id, status: existing.status.toLowerCase() });
+  if (existing) return reply.code(202).send({ turnId: existing.id, status: turnStatusName(existing.status) });
   const turn = await db.$transaction(async (tx) => {
     const created = await tx.turn.create({ data: { sessionId: session.id, idempotencyKey, status: TurnStatus.QUEUED } });
     await tx.message.create({ data: { sessionId: session.id, turnId: created.id, role: MessageRole.USER, content: parsed.data.content } });
@@ -505,13 +541,6 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
   if (!/^\d+$/.test(cursorText)) return reply.code(400).send({ error: "Invalid event cursor" });
   const after = BigInt(cursorText);
   try { toDatabaseCursor(after); } catch { return reply.code(400).send({ error: "Invalid event cursor" }); }
-  let lastSent = after;
-  const write = (event: { cursor: number; kind: string } & Record<string, unknown>) => {
-    const cursor = BigInt(event.cursor);
-    if (cursor <= lastSent) return;
-    lastSent = cursor;
-    reply.raw.write(`id: ${event.cursor}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
-  };
   reply.hijack();
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -521,27 +550,22 @@ app.get<{ Params: { id: string }; Querystring: { after?: string } }>("/api/sessi
   });
   const heartbeat = setInterval(() => reply.raw.write(": heartbeat\n\n"), 15_000);
   let closed = false;
+  const write = (event: HubEvent) => {
+    if (closed) return;
+    reply.raw.write(`id: ${event.cursor}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
+  };
+  const unsubscribe = sessionEvents.subscribe(session.id, toDatabaseCursor(after), (events) => {
+    for (const event of events) write(event);
+  });
   request.raw.on("close", () => {
     closed = true;
     clearInterval(heartbeat);
-  });
-  void (async () => {
-    while (!closed) {
-      const backlog = await db.sessionEvent.findMany({
-        where: { sessionId: session.id, cursor: { gt: toDatabaseCursor(lastSent) } },
-        orderBy: { cursor: "asc" },
-        take: 2_000
-      });
-      for (const event of backlog) write({ cursor: Number(event.cursor), kind: event.kind, sessionId: event.sessionId, turnId: event.turnId, data: event.data, createdAt: event.createdAt.toISOString() });
-      if (backlog.length < 2_000) await new Promise((resolve) => setTimeout(resolve, config.EVENT_POLL_INTERVAL_MS));
-    }
-  })().catch((error) => {
-    request.log.error(error, "SSE polling failed");
-    if (!closed) reply.raw.end();
+    unsubscribe();
   });
 });
 
 app.addHook("onClose", async () => {
+  sessionEvents.close();
   registry.close();
   await Promise.all([
     app.ephemeral.close(),
