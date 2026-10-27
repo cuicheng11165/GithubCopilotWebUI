@@ -6,6 +6,10 @@ export type ApprovalMode = z.infer<typeof approvalModeSchema>;
 export const approvalScopeSchema = z.enum(["shell", "url", "private-script", "mcp"]);
 export type ApprovalScope = z.infer<typeof approvalScopeSchema>;
 
+export const CONTINUE_PERMISSION_SCOPE = "continue";
+export const permissionScopeSchema = z.union([approvalScopeSchema, z.literal(CONTINUE_PERMISSION_SCOPE)]);
+export type PermissionScope = z.infer<typeof permissionScopeSchema>;
+
 export function shouldAutoApprove(mode: ApprovalMode, scopes: readonly ApprovalScope[], scope: ApprovalScope): boolean {
   return mode === "allow-all" || (mode === "session-scoped" && scopes.includes(scope));
 }
@@ -112,7 +116,7 @@ export const permissionRequestSchema = z.object({
   id: z.string().uuid(),
   sessionId: z.string().uuid(),
   turnId: z.string().uuid(),
-  scope: approvalScopeSchema,
+  scope: permissionScopeSchema,
   intention: z.string(),
   display: z.string(),
   status: z.enum(["pending", "approved", "denied", "expired"]),

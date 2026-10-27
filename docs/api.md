@@ -26,4 +26,4 @@ All application routes are under `/api`. Browser authentication uses the `copilo
 
 Session deletion is synchronous with SDK-state cleanup. It returns `503` rather than deleting database history if the Worker cannot confirm SDK-state deletion.
 
-`GET /sessions/:id` includes turn summaries. `timed-out` and `interrupted` are terminal: the worker does not start those turns again. `TURN_TIMEOUT_MS` controls when a running turn becomes `timed-out`.
+`GET /sessions/:id` includes turn summaries. `timed-out` and `interrupted` are terminal: the worker does not start those turns again. `TURN_TIMEOUT_MS` controls when a running turn becomes `timed-out`. `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` (default 50) pauses a turn after that many tool rounds and asks the user to continue or stop. Stop, or no answer before `APPROVAL_TIMEOUT_SECONDS`, marks the turn `stopped`.

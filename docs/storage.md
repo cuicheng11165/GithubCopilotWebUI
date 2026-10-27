@@ -20,7 +20,7 @@ DATABASE_URL=file:../../../data/copilot.db?connection_limit=1
 
 SQLite runs in WAL mode with foreign keys enabled, one connection per process, and a ten-second busy timeout. The API and Worker share the same database file. Queued `Turn` rows are claimed with a worker lease; approval, cancellation, same-Session serialization, and replayable event delivery are all driven by database state.
 
-A running turn stores `leaseOwner` and `leaseExpiresAt`. The worker renews that lease while the turn is running or waiting for approval. Startup and periodic recovery mark only expired or unowned leases as `INTERRUPTED`. Those turns are not queued again, so a restart cannot repeat shell commands or other side effects. Send a new message to retry. Do not place the database on NFS or another network filesystem.
+A running turn stores `leaseOwner` and `leaseExpiresAt`. The worker renews that lease while the turn is running or waiting for approval, including while a continue checkpoint is open. `MAX_TOOL_ROUNDS_BEFORE_CONFIRM` defaults to 50. Time spent on that checkpoint does not count toward `TURN_TIMEOUT_MS`. Startup and periodic recovery mark only expired or unowned leases as `INTERRUPTED`. Those turns are not queued again, so a restart cannot repeat shell commands, continue prompts, or other side effects. Send a new message to retry. Do not place the database on NFS or another network filesystem.
 
 Assistant delta events are deleted once the turn's final assistant message is stored. Tool events, approvals, and turn results stay in `SessionEvent` for replay.
 
