@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bot, ChevronDown, Github, LogOut, Menu, Pencil, Plus, Send, Shield, ShieldAlert, Square, Trash2, X } from "lucide-react";
-import type { ApprovalMode, ApprovalScope, AuthUser, ChatMessage, ChatSession, LlmTraceEntry, ModelSummary, PermissionRequest, RepositorySummary } from "@app/contracts";
+import { mergeSecureFormSnapshot, parseSecureFormSnapshot, visibleSecureFormCards, type ApprovalMode, type ApprovalScope, type AuthUser, type ChatMessage, type ChatSession, type LlmTraceEntry, type ModelSummary, type PermissionRequest, type RepositorySummary, type SecureFormSnapshot } from "@app/contracts";
 import { ApiError, apiWrite, getMe, getModels, getRepositories, getSession, getSessions, getSessionTrace } from "../lib/api";
 import { createStreamCursorState, eventTurnNotice, reducePermissions, reduceStreamEvent, sealTurnsWithAssistantMessages, visibleTurnNotice, type StreamEventInput } from "../lib/stream-state";
 import { groupConversationMessages } from "../lib/conversation-items";
 import { Message } from "./message";
 import { NewSessionDialog } from "./new-session-dialog";
 import { PermissionCard } from "./permission-card";
+import { advanceSecureFormCard, SecureFormCard } from "./secure-form-card";
 import { ToolActivityGroup } from "./tool-activity-group";
 
 export function ChatApp() {
@@ -17,6 +18,7 @@ export function ChatApp() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
+  const [secureForms, setSecureForms] = useState<SecureFormSnapshot[]>([]);
   const [skills, setSkills] = useState<Array<{ name: string; warning: string | null }>>([]);
   const [repositories, setRepositories] = useState<RepositorySummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([]);
@@ -56,11 +58,11 @@ export function ChatApp() {
   })(); }, []);
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); setPermissions([]); setSkills([]); setTurnNotice(null); setStreaming(""); setStreamingLive(false); setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); return; }
+    if (!activeId) { setMessages([]); setPermissions([]); setSecureForms([]); setSkills([]); setTurnNotice(null); setStreaming(""); setStreamingLive(false); setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); return; }
     setStreaming("");
     setStreamingLive(false);
     setTurnNotice(null);
-    setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false);
+    setActiveTool(null); setRunningTurnId(null); setTrace([]); setTraceOpen(false); setSecureForms([]);
     let closed = false;
     let events: EventSource | null = null;
     const stream = createStreamCursorState();
@@ -80,6 +82,7 @@ export function ChatApp() {
       if (closed) return;
       setMessages(detail.messages);
       setPermissions(detail.permissions);
+      setSecureForms(detail.secureForms ?? []);
       setSkills(detail.skills);
       setTurnNotice(visibleTurnNotice(detail.turns ?? []));
       for (const id of sealTurnsWithAssistantMessages(detail.messages)) stream.sealedTurnIds.add(id);
@@ -119,13 +122,17 @@ export function ChatApp() {
             setSessions((current) => current.map((item) => item.id === activeId && item.status === "waiting-approval" ? { ...item, status: "running" } : item));
           }
         }
+        if (payload.kind === "secure-form.requested" || payload.kind === "secure-form.updated" || payload.kind === "secure-form.completed") {
+          const snapshot = parseSecureFormSnapshot(data);
+          if (snapshot) setSecureForms((current) => mergeSecureFormSnapshot(current, snapshot));
+        }
         if (payload.kind === "turn.queued") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "queued" } : item));
         if (payload.kind === "turn.started") {
           setTurnNotice(null);
           setRunningTurnId(payload.turnId);
           setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "running" } : item));
         }
-        if (payload.kind === "permission.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
+        if (payload.kind === "permission.requested" || payload.kind === "secure-form.requested") setSessions((current) => current.map((item) => item.id === activeId ? { ...item, status: "waiting-approval" } : item));
         const notice = eventTurnNotice(payload.kind, data.error, data.reason);
         if (notice) {
           setTurnNotice(notice);
@@ -138,13 +145,13 @@ export function ChatApp() {
         }
         if (["turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted", "session.updated"].includes(payload.kind)) void refreshSessions();
       };
-      ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "usage.updated", "turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted", "session.updated"].forEach((kind) => events?.addEventListener(kind, handle));
+      ["turn.queued", "turn.started", "assistant.delta", "assistant.message", "tool.started", "tool.completed", "permission.requested", "permission.completed", "secure-form.requested", "secure-form.updated", "secure-form.completed", "usage.updated", "turn.completed", "turn.failed", "turn.stopped", "turn.timed_out", "turn.interrupted", "session.updated"].forEach((kind) => events?.addEventListener(kind, handle));
     }).catch((caught) => { if (!closed) setError(caught instanceof Error ? caught.message : "Failed to load session"); });
     return () => { closed = true; events?.close(); };
   }, [activeId, refreshSessions]);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streaming, streamingLive, permissions, activeTool, turnNotice]);
+  }, [messages, streaming, streamingLive, permissions, secureForms, activeTool, turnNotice]);
 
   if (!me) return <div className="app-loading"><div className="brand-mark"><Bot size={24} /></div><span>Loading workspace…</span></div>;
 
@@ -208,7 +215,7 @@ export function ChatApp() {
           ? <Message key={item.key} message={item.message} />
           : <ToolActivityGroup key={item.key} messages={item.messages} isRunning={item.turnId !== null && item.turnId === activeToolTurnId && !completedTurnIds.has(item.turnId)} runningTool={item.turnId === activeTool?.turnId ? activeTool.name : null} />)}
           {activeToolTurnId !== null && !hasActiveToolGroup && !completedTurnIds.has(activeToolTurnId) && <ToolActivityGroup messages={[]} isRunning runningTool={activeTool?.name ?? null} />}
-          {streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streamingLive ? `${streaming} ▍` : streaming, createdAt: new Date().toISOString() }} />}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}<div ref={bottomRef} /></div>
+          {streaming && <Message message={{ id: "streaming", sessionId: active.id, turnId: null, role: "assistant", content: streamingLive ? `${streaming} ▍` : streaming, createdAt: new Date().toISOString() }} />}{permissions.map((permission) => <PermissionCard key={permission.id} request={permission} onDecision={async (decision) => { await apiWrite(`/api/sessions/${active.id}/permissions/${permission.id}/respond`, me.csrfToken, "POST", { decision }); setPermissions((current) => current.filter((item) => item.id !== permission.id)); }} />)}{secureForms.flatMap((form) => visibleSecureFormCards(form).map((card) => <SecureFormCard key={card.key} card={card} csrfToken={me.csrfToken} onAdvance={(current) => setSecureForms((forms) => advanceSecureFormCard(forms, current))} onCancel={(current) => setSecureForms((forms) => forms.map((item) => item.id === current.form.id ? { ...item, status: "cancelled" } : item))} />))}<div ref={bottomRef} /></div>
         <div className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${active.repositoryName}…`} rows={1} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><div className="composer-controls"><label className="composer-select agent-select"><Bot size={14} /><select aria-label="Agent" value={active.agent} onChange={(event) => void updateSession(active, { agent: event.target.value })}><option value="">Default agent</option>{activeRepository?.agents.map((agent) => <option key={agent.name} value={agent.name}>{agent.name}</option>)}</select><ChevronDown size={12} /></label><label className="composer-select"><select aria-label="Model" value={active.model} onChange={(event) => void updateSession(active, { model: event.target.value })}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><ChevronDown size={12} /></label><label className={`composer-select ${active.approvalMode === "allow-all" ? "danger" : ""}`}><Shield size={13} /><select aria-label="Approval mode" value={active.approvalMode} onChange={(event) => void updateSession(active, { approvalMode: event.target.value, approvalScopes: event.target.value === "session-scoped" ? active.approvalScopes : [] })}><option value="interactive">Default approvals</option><option value="session-scoped">Session approvals</option><option value="allow-all">Allow all</option></select><ChevronDown size={12} /></label></div>{["running", "queued", "waiting-approval"].includes(active.status) ? <button className="send-button stop" aria-label="Stop" onClick={() => void apiWrite(`/api/sessions/${active.id}/stop`, me.csrfToken, "POST")}><Square size={14} fill="currentColor" /></button> : <button className="send-button" aria-label="Send" disabled={!draft.trim()} onClick={() => void send()}><Send size={17} /></button>}</div></div><p className="composer-note">Local execution · Copilot can make mistakes. Review changes and commands.</p></div>
       </>}
     </section>

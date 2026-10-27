@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<body>
+  <section data-screen="email">
+    <input id="i0116" name="loginfmt" type="email" />
+    <input id="idSIButton9" type="submit" value="Next" />
+  </section>
+  <section data-screen="password">
+    <input id="i0118" name="passwd" type="password" />
+    <input id="idSIButton9" type="submit" value="Sign in" />
+  </section>
+  <section data-screen="password-error">
+    <input id="i0118" name="passwd" type="password" />
+    <div id="passwordError">Your account or password is incorrect.</div>
+    <input id="idSIButton9" type="submit" value="Sign in" />
+  </section>
+  <section data-screen="unknown-account">
+    <input id="i0116" name="loginfmt" type="email" />
+    <div id="usernameError">This username may be incorrect.</div>
+    <input id="idSIButton9" type="submit" value="Next" />
+  </section>
+  <section data-screen="locked">
+    <div id="idA_IL_Locked">Account locked</div>
+  </section>
+  <section data-screen="otp">
+    <input id="idTxtBx_SAOTCC_OTC" name="otc" type="tel" />
+    <input id="idSIButton9" type="submit" value="Verify" />
+  </section>
+  <section data-screen="otp-error">
+    <input id="idTxtBx_SAOTCC_OTC" name="otc" type="tel" />
+    <span id="idSpan_SAOTCC_Error_OTC">That code didn't work.</span>
+    <input id="idSIButton9" type="submit" value="Verify" />
+  </section>
+  <section data-screen="number-match">
+    <div id="idRichContext_DisplaySign">42</div>
+  </section>
+  <section data-screen="stay-signed-in">
+    <div id="KmsiDescription">Stay signed in?</div>
+    <input id="idSIButton9" type="submit" value="Yes" />
+    <input id="idBtn_Back" type="button" value="No" />
+  </section>
+  <section data-screen="unsupported">
+    <div id="idUnsupported">Security key, passkey, or captcha</div>
+    <div id="idDiv_SAOTCS_Proofs">Choose a verification method</div>
+    <div id="idDiv_SAASDS_Title">Use a security key</div>
+  </section>
+</body>
+</html>

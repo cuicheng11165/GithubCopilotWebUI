@@ -23,6 +23,17 @@ All application routes are under `/api`. Browser authentication uses the `copilo
 | GET | `/sessions/:id/events` | Replayable SSE stream; accepts `Last-Event-ID` or `after`. One process-wide poll fans out to connections. |
 | POST | `/internal/events/notify` | Worker wake-up for the event hub. Requires the worker control token. |
 | POST | `/sessions/:id/permissions/:requestId/respond` | `approve-once` or `deny` |
+| POST | `/sessions/:id/secure-forms/:formId/submit` | Submit the current secure-form step. Requires the session owner and `X-CSRF-Token`. The response is `{ status, currentStep, stepId }` and does not echo field values. |
+| POST | `/sessions/:id/secure-forms/:formId/cancel` | Cancel a pending secure form. Requires the session owner and `X-CSRF-Token`. |
+| POST | `/internal/secure-forms` | Create a secure form for the session's active turn. Worker or sandbox bearer token. |
+| GET | `/internal/secure-forms/:id?sessionId=` | Read secure-form metadata. No field values. |
+| POST | `/internal/secure-forms/:id/claim` | Single-use claim of every submitted step. Response contains values and is `Cache-Control: no-store`. |
+| POST | `/internal/secure-forms/:id/claim-step` | Single-use claim of one already submitted step. |
+| POST | `/internal/secure-forms/:id/cancel` | Cancel one pending form. |
+| POST | `/internal/secure-forms/:id/expire` | Expire one pending form. |
+| POST | `/internal/secure-forms/cancel` | Cancel pending forms for a session or turn. |
+| POST | `/internal/secure-forms/discard` | Drop unclaimed values from API memory. |
+| POST | `/secure-form/deliver` on the sandbox runner | Claim values and write them to a command's stdin. Requires `SANDBOX_RUNNER_TOKEN`. |
 
 Session deletion is synchronous with SDK-state cleanup. It returns `503` rather than deleting database history if the Worker cannot confirm SDK-state deletion.
 

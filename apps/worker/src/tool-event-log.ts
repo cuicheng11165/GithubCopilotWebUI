@@ -2,7 +2,7 @@ const MAX_STRING_LENGTH = 64 * 1024;
 const MAX_DEPTH = 12;
 const REDACTED = "[Redacted]";
 const TRUNCATED = "\n...[truncated in log]";
-const SENSITIVE_KEY = /^(?:authorization|cookie|set-cookie|token|accessToken|refreshToken|apiKey|secret|password|clientSecret|privateKey)$/i;
+const SENSITIVE_KEY = /^(?:authorization|cookie|set-cookie|token|accessToken|refreshToken|apiKey|secret|password|clientSecret|privateKey|otp|passcode|pin|mfaCode|verificationCode|credential|credentials|secureFormValues)$/i;
 
 function sanitize(value: unknown, depth: number, key?: string): unknown {
   if (key && SENSITIVE_KEY.test(key)) return REDACTED;
@@ -24,7 +24,7 @@ function sanitize(value: unknown, depth: number, key?: string): unknown {
 
 /**
  * Makes SDK tool event data safe and bounded enough for structured session logs.
- * The unmodified event continues to be persisted in the session database.
+ * request_secure_form payloads are redacted again before they are written to the session database.
  */
 export function sanitizeToolEventForLog(data: Record<string, unknown>): Record<string, unknown> {
   return sanitize(data, 0) as Record<string, unknown>;

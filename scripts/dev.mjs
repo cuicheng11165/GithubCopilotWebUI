@@ -7,7 +7,7 @@ const root = process.cwd();
 const envFile = path.join(root, ".env");
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_ROOT"]) {
+for (const name of ["REPOSITORIES_CONFIG", "COPILOT_HOME", "LOCAL_SANDBOX_TMP_ROOT", "MS_LOGIN_CLI", "PLAYWRIGHT_BROWSERS_PATH"]) {
   const value = process.env[name];
   if (value?.startsWith("./")) process.env[name] = path.resolve(root, value);
 }

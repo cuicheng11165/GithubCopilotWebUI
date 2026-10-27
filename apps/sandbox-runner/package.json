@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@app/contracts": "workspace:*",
     "@app/repository-tools": "workspace:*",
     "@app/security": "workspace:*",
     "fastify": "5.10.0",

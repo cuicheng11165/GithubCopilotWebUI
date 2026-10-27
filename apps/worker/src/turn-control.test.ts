@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { classifyPermissionPoll, CONTINUE_EXPIRED_MESSAGE, CONTINUE_STOPPED_MESSAGE, continueCheckpointCopy, INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sdkTurnWaitMs, sessionStatusAfterInterrupt, TurnTimeoutError, turnTimeoutMessage, waitForTurn } from "./turn-control.js";
+import { classifyPermissionPoll, CONTINUE_EXPIRED_MESSAGE, CONTINUE_STOPPED_MESSAGE, continueCheckpointCopy, createActiveTurnClock, INTERRUPTED_TURN_MESSAGE, SANDBOX_STOP_TIMEOUT_MS, sandboxRequestTimeoutMs, sdkTurnCeilingMs, sdkTurnWaitMs, sessionStatusAfterInterrupt, TurnTimeoutError, turnTimeoutMessage, waitForTurn } from "./turn-control.js";
 
 describe("turn timeout", () => {
   it("describes the configured limit", () => {
@@ -87,7 +87,44 @@ describe("permission poll classification", () => {
   });
 });
 
-describe("lease recovery status", () => {
+describe("paused turn deadline", () => {
+  it("freezes the active budget while approval or a secure form is waiting", () => {
+    let current = 1_000;
+    const clock = createActiveTurnClock(1_000, () => current);
+    current = 1_400;
+    expect(clock.remainingMs()).toBe(600);
+    clock.hold();
+    current = 2_000;
+    expect(clock.remainingMs()).toBe(600);
+    expect(clock.isPaused()).toBe(true);
+    clock.setExternal(true);
+    clock.release();
+    current = 2_500;
+    expect(clock.isPaused()).toBe(true);
+    expect(clock.remainingMs()).toBe(600);
+    clock.setExternal(false);
+    current = 2_700;
+    expect(clock.remainingMs()).toBe(400);
+    expect(sdkTurnCeilingMs(900_000, 7_200_000)).toBe(8_100_000);
+  });
+
+  it("does not count paused time toward the turn timeout", async () => {
+    const clock = createActiveTurnClock(50);
+    clock.hold();
+    const abort = vi.fn(async () => undefined);
+    const pending = waitForTurn({
+      timeoutMs: 50,
+      clock,
+      send: () => new Promise(() => undefined),
+      abort
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(abort).not.toHaveBeenCalled();
+    clock.release();
+    await expect(pending).rejects.toBeInstanceOf(TurnTimeoutError);
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
   it("keeps queued work runnable and otherwise surfaces an error", () => {
     expect(sessionStatusAfterInterrupt(["QUEUED"])).toBe("QUEUED");
     expect(sessionStatusAfterInterrupt(["RUNNING", "QUEUED"])).toBe("RUNNING");

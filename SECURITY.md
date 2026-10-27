@@ -26,6 +26,18 @@ An enabled repository must therefore be considered entirely visible and writable
 
 Approval requests expire after five minutes and are denied on stop, logout, deletion, or Worker shutdown. Approval only decides whether execution starts; it is not a security boundary around the resulting process. `Allow all` should be reserved for fully trusted users and repositories.
 
+## Secure forms
+
+`request_secure_form` and the sandbox helper `node "$COPILOT_SECURE_FORM_BIN"` collect passwords, one-time codes, and approve-on-device confirmations from the session owner.
+
+- Field values are not written to `SessionEvent`, audit metadata, tool transcripts, or the model result. The model learns status, field names, and delivery success or failure.
+- Values are held as short-lived buffers in the API process, claimed once, then zeroed. JavaScript strings created while reading the HTTP body cannot be wiped reliably.
+- Submit and cancel routes require the session cookie, owner check, and CSRF token. Internal create, claim, and cancel routes require the worker or sandbox bearer token plus a matching `sessionId`.
+- Allow-all does not submit or skip a secure form. A `deliveryCommand` still needs a separate shell approval before the form opens, including in allow-all and session-scoped modes. A helper started inside an already approved shell is covered by that shell approval.
+- The turn clock pauses while a form is pending, and the worker keeps renewing the turn lease. Stop, logout, deletion, worker shutdown, and lease recovery cancel pending forms.
+- Exact stdout/stderr redaction runs after a delivery command. It does not stop a command from encoding or writing the same secret somewhere else. An approved shell remains the host-user trust boundary described above.
+- `packages/ms-login` is a Playwright script for Microsoft and SharePoint sign-in. It runs inside an approved shell, asks for each value with a secure form, and reads that value from the delivery process stdin. It does not log, screenshot, or put passwords in arguments. The saved file is browser storage state (cookies) with mode `0600`. Other sites still have no login driver. Conditional access, FIDO or passkeys, and captcha are not handled.
+
 ## Network behavior
 
 The dedicated URL tool resolves and validates public HTTP/HTTPS targets, rejects loopback, private, link-local, carrier-grade NAT and metadata addresses, disables redirects, and caps response size.
